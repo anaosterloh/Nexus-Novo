@@ -1,0 +1,37 @@
+# Dependências
+node_modules/
+
+# Builds e arquivos gerados
+build/
+dist/
+coverage/
+.vite/
+
+# Sistema / editor
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Variáveis de ambiente
+.env
+.env.*
+!.env.example
+
+# Banco de dados local
+server/nexus_erp.db
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+# Arquivos temporários
+*.tmp
+*.temp

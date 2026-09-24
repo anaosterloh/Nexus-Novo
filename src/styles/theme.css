@@ -1,0 +1,50 @@
+:root {
+  /* Base Colors */
+  --bg-page: #0f172a;
+  --bg-card: #111827;
+  --border: #1f2937;
+
+  /* Text Colors */
+  --text-primary: #f9fafb;
+  --text-secondary: #9ca3af;
+
+  /* Status Colors */
+  --status-green: #22c55e;
+  --status-blue: #3b82f6;
+  --status-orange: #f59e0b;
+  --status-red: #ef4444;
+
+  /* Sidebar */
+  --sidebar-section-bg: #1f2937;
+}
+
+/* Light Mode Overrides */
+:root:not(.dark) {
+  --bg-page: #f8fafc;
+  --bg-card: #ffffff;
+  --border: #e2e8f0;
+
+  --text-primary: #0f172a;
+  --text-secondary: #64748b;
+
+  --sidebar-section-bg: #f1f5f9;
+}
+
+/* Utility Classes */
+.card-dark {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+}
+
+.text-primary-theme {
+  color: var(--text-primary);
+}
+
+.text-secondary-theme {
+  color: var(--text-secondary);
+}
+
+.bg-page {
+  background-color: var(--bg-page);
+}

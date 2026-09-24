@@ -1,0 +1,7 @@
+{
+  "name": "Nexus ERP",
+  "description": "A comprehensive, multi-company Enterprise Resource Planning system with modules for Commercial, Inventory, Financial, Technical Service, and Logistics management.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
