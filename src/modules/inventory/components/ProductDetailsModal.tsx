@@ -53,24 +53,48 @@ export function ProductDetailsModal({ open, onOpenChange, product }: ProductDeta
                   <Badge className={product.status === 'active' ? 'bg-emerald-500 hover:bg-emerald-600' : 'bg-zinc-500'}>
                     {product.status === 'active' ? 'Ativo' : 'Inativo'}
                   </Badge>
-                  {product.item_type === 'kit' && (
+                  
+                  {/* Classificação Operacional */}
+                  {product.item_type === 'part' && (
+                    <Badge variant="outline" className="bg-slate-100 text-slate-700 border-slate-300">
+                      Peça / Componente
+                    </Badge>
+                  )}
+                  {(product.item_type === 'consumable' || product.item_type === 'raw_material') && (
+                    <Badge variant="outline" className="bg-zinc-100 text-zinc-700 border-zinc-300">
+                      Consumo / Insumo
+                    </Badge>
+                  )}
+                  {product.item_type === 'sale' && (
+                    <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200">
+                      Venda / Revenda
+                    </Badge>
+                  )}
+
+                  {/* Controles de Rastreabilidade e Composição */}
+                  {Boolean(product.is_composite || product.item_type === 'kit') && (
                     <Badge className="bg-purple-600 text-white hover:bg-purple-700">
-                      Kit / Composto
+                      Kit / BOM
                     </Badge>
                   )}
-                  {product.item_type === 'batch' && (
+                  {Boolean(product.tracks_batch || product.item_type === 'batch') && (
                     <Badge className="bg-blue-600 text-white hover:bg-blue-700">
-                      Lote Rastreável
+                      Lote
                     </Badge>
                   )}
-                  {product.item_type === 'serial' && (
+                  {Boolean(product.tracks_serial || product.item_type === 'serial') && (
                     <Badge className="bg-amber-600 text-white hover:bg-amber-700">
-                      Serializado
+                      Serial
                     </Badge>
                   )}
-                  {product.item_type === 'raw_material' && (
-                    <Badge className="bg-zinc-600 text-white hover:bg-zinc-700">
-                      Matéria-Prima
+                  {Boolean(product.tracks_expiry) && (
+                    <Badge className="bg-orange-600 text-white hover:bg-orange-700">
+                      Validade
+                    </Badge>
+                  )}
+                  {Boolean(product.tracks_manufacturing_date) && (
+                    <Badge className="bg-teal-600 text-white hover:bg-teal-700">
+                      Fabricação
                     </Badge>
                   )}
                 </div>

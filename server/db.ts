@@ -272,9 +272,11 @@ export function initDb() {
 
   // --- FUNDAÇÃO DE DADOS PARA ESTOQUE RASTREÁVEL ---
   // 1. Ampliação segura de inventory_items
-  addColumnIfNotExists('inventory_items', 'item_type', "TEXT DEFAULT 'simple'"); // 'simple', 'batch', 'serial', 'kit', 'raw_material'
+  addColumnIfNotExists('inventory_items', 'item_type', "TEXT DEFAULT 'sale'"); // Classificação: 'sale', 'part', 'consumable'
   addColumnIfNotExists('inventory_items', 'tracks_batch', 'INTEGER DEFAULT 0');
   addColumnIfNotExists('inventory_items', 'tracks_serial', 'INTEGER DEFAULT 0');
+  addColumnIfNotExists('inventory_items', 'tracks_expiry', 'INTEGER DEFAULT 0');
+  addColumnIfNotExists('inventory_items', 'tracks_manufacturing_date', 'INTEGER DEFAULT 0');
   addColumnIfNotExists('inventory_items', 'is_composite', 'INTEGER DEFAULT 0');
   addColumnIfNotExists('inventory_items', 'physical_location', 'TEXT');
   addColumnIfNotExists('inventory_items', 'validity_alert_days', 'INTEGER DEFAULT 0');
@@ -288,6 +290,20 @@ export function initDb() {
   addColumnIfNotExists('inventory_items', 'cfop', 'TEXT');
   addColumnIfNotExists('inventory_items', 'observations', 'TEXT');
   addColumnIfNotExists('inventory_items', 'updated_at', 'DATETIME');
+
+  // Transição segura de dados legados: separar classificação operacional de rastreabilidade
+  try {
+    db.exec(`
+      UPDATE inventory_items SET tracks_batch = 1 WHERE item_type = 'batch' AND (tracks_batch IS NULL OR tracks_batch = 0);
+      UPDATE inventory_items SET tracks_serial = 1 WHERE item_type = 'serial' AND (tracks_serial IS NULL OR tracks_serial = 0);
+      UPDATE inventory_items SET is_composite = 1 WHERE item_type = 'kit' AND (is_composite IS NULL OR is_composite = 0);
+      UPDATE inventory_items SET item_type = 'consumable' WHERE item_type = 'raw_material';
+      UPDATE inventory_items SET item_type = 'sale' WHERE item_type IN ('simple', 'batch', 'serial', 'kit');
+      UPDATE inventory_items SET item_type = 'sale' WHERE item_type IS NULL OR item_type = '';
+    `);
+  } catch (e) {
+    console.error('Falha na migração suave de item_type:', e);
+  }
 
   // 2. Ampliação segura de stock_movements (motivos estruturados e rastreabilidade)
   addColumnIfNotExists('stock_movements', 'lot_id', 'TEXT');
@@ -352,6 +368,7 @@ export function initDb() {
   db.exec('CREATE INDEX IF NOT EXISTS idx_stock_serials_lot ON stock_serials(lot_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_stock_serials_num ON stock_serials(serial_number)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_stock_serials_status ON stock_serials(status)');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_serials_unique ON stock_serials(company_id, item_id, serial_number)');
 
   // 5. Reservas Rastreáveis de Estoque (sem alterar confirmação imediata existente)
   db.exec(`
@@ -1230,7 +1247,7 @@ export function initDb() {
 
   seedNotificationParams();
   migrateToEntities();
-  seedTraceableStockFoundation();
+  // seedTraceableStockFoundation() desativado na inicialização padrão conforme especificação
 }
 
 export default db;

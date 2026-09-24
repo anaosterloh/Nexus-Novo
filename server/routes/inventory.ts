@@ -49,6 +49,10 @@ router.post('/items', (req, res) => {
     tracksBatch,
     tracks_serial,
     tracksSerial,
+    tracks_expiry,
+    tracksExpiry,
+    tracks_manufacturing_date,
+    tracksManufacturingDate,
     is_composite,
     isComposite,
     physical_location,
@@ -79,10 +83,22 @@ router.post('/items', (req, res) => {
   const finalMinStock = min_stock !== undefined ? min_stock : (minStock || 0);
   const finalMaxStock = max_stock !== undefined ? max_stock : (maxStock || 0);
   const finalStatus = status || 'active';
-  const finalItemType = item_type || itemType || 'simple';
+  
+  // Normalizar item_type para 'sale', 'part', 'consumable' mantendo compatibilidade
+  let rawItemType = item_type || itemType || 'sale';
+  if (rawItemType === 'simple' || rawItemType === 'batch' || rawItemType === 'serial' || rawItemType === 'kit') {
+    rawItemType = 'sale';
+  } else if (rawItemType === 'raw_material') {
+    rawItemType = 'consumable';
+  }
+  const finalItemType = (rawItemType === 'part' || rawItemType === 'consumable' || rawItemType === 'sale') ? rawItemType : 'sale';
+
+  // Controles de rastreabilidade e composição independentes
   const finalTracksBatch = (tracks_batch || tracksBatch) ? 1 : 0;
   const finalTracksSerial = (tracks_serial || tracksSerial) ? 1 : 0;
-  const finalIsComposite = (is_composite || isComposite || finalItemType === 'kit') ? 1 : 0;
+  const finalTracksExpiry = (tracks_expiry || tracksExpiry) ? 1 : 0;
+  const finalTracksMfgDate = (tracks_manufacturing_date || tracksManufacturingDate) ? 1 : 0;
+  const finalIsComposite = (is_composite || isComposite) ? 1 : 0;
   const finalLocation = physical_location || location || null;
   const finalValidityDays = validity_alert_days !== undefined ? validity_alert_days : (validityAlertDays || 0);
   const finalCostPrice = cost_price !== undefined ? cost_price : (costPrice || 0);
@@ -108,6 +124,8 @@ router.post('/items', (req, res) => {
             item_type = ?,
             tracks_batch = ?,
             tracks_serial = ?,
+            tracks_expiry = ?,
+            tracks_manufacturing_date = ?,
             is_composite = ?,
             physical_location = ?,
             validity_alert_days = ?,
@@ -124,8 +142,8 @@ router.post('/items', (req, res) => {
         `).run(
           code, description, category || null, unit || 'UN', ncm || null,
           finalMinStock, finalMaxStock, finalStatus, finalItemType,
-          finalTracksBatch, finalTracksSerial, finalIsComposite,
-          finalLocation, finalValidityDays, finalCostPrice,
+          finalTracksBatch, finalTracksSerial, finalTracksExpiry, finalTracksMfgDate,
+          finalIsComposite, finalLocation, finalValidityDays, finalCostPrice,
           finalSellingPrice, finalMinSellingPrice, cest || null,
           finalTaxRegime, origin || null, cfop || null,
           observations || null, itemId
@@ -134,15 +152,15 @@ router.post('/items', (req, res) => {
         db.prepare(`
           INSERT INTO inventory_items (
             id, company_id, code, description, category, unit, ncm, min_stock, max_stock, status,
-            item_type, tracks_batch, tracks_serial, is_composite, physical_location,
+            item_type, tracks_batch, tracks_serial, tracks_expiry, tracks_manufacturing_date, is_composite, physical_location,
             validity_alert_days, cost_price, selling_price, min_selling_price,
             cest, tax_regime, origin, cfop, observations, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         `).run(
           itemId, finalCompanyId, code, description, category || null, unit || 'UN', ncm || null,
           finalMinStock, finalMaxStock, finalStatus, finalItemType,
-          finalTracksBatch, finalTracksSerial, finalIsComposite,
-          finalLocation, finalValidityDays, finalCostPrice,
+          finalTracksBatch, finalTracksSerial, finalTracksExpiry, finalTracksMfgDate,
+          finalIsComposite, finalLocation, finalValidityDays, finalCostPrice,
           finalSellingPrice, finalMinSellingPrice, cest || null,
           finalTaxRegime, origin || null, cfop || null, observations || null
         );
@@ -159,7 +177,7 @@ router.post('/items', (req, res) => {
         }
       }
 
-      // If batches provided, synchronize with stock_lots
+      // If batches provided, synchronize with stock_lots without overriding balance
       if (Array.isArray(batches)) {
         const branch = db.prepare('SELECT id FROM branches WHERE company_id = ? LIMIT 1').get(finalCompanyId) as any;
         const branchId = branch ? branch.id : 'bran_1';
@@ -168,14 +186,13 @@ router.post('/items', (req, res) => {
           if (!b.batchNumber && !b.lot_number) continue;
           const lotNum = b.batchNumber || b.lot_number;
           const lotId = b.id && !b.id.startsWith('BATCH-') && !b.id.startsWith('LOT-') ? b.id : `lot_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
-          const existingLot = db.prepare('SELECT id FROM stock_lots WHERE item_id = ? AND lot_number = ?').get(itemId, lotNum) as any;
+          const existingLot = db.prepare('SELECT id, quantity FROM stock_lots WHERE item_id = ? AND lot_number = ?').get(itemId, lotNum) as any;
           
           if (existingLot) {
             db.prepare(`
               UPDATE stock_lots SET
                 manufacturing_date = ?,
                 expiry_date = ?,
-                quantity = ?,
                 status = ?,
                 notes = ?,
                 updated_at = CURRENT_TIMESTAMP
@@ -183,7 +200,6 @@ router.post('/items', (req, res) => {
             `).run(
               b.manufacturingDate || b.manufacturing_date || null,
               b.expiryDate || b.expiry_date || null,
-              b.quantity || 0,
               b.status || 'active',
               b.observations || b.notes || null,
               existingLot.id
@@ -192,12 +208,11 @@ router.post('/items', (req, res) => {
             db.prepare(`
               INSERT INTO stock_lots (
                 id, company_id, branch_id, item_id, lot_number, manufacturing_date, expiry_date, quantity, status, notes
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
             `).run(
               lotId, finalCompanyId, branchId, itemId, lotNum,
               b.manufacturingDate || b.manufacturing_date || null,
               b.expiryDate || b.expiry_date || null,
-              b.quantity || 0,
               b.status || 'active',
               b.observations || b.notes || null
             );
@@ -303,7 +318,6 @@ router.post('/items/:id/lots', (req, res) => {
     lot_number, 
     manufacturing_date, 
     expiry_date, 
-    quantity, 
     physical_location, 
     status, 
     notes 
@@ -312,7 +326,7 @@ router.post('/items/:id/lots', (req, res) => {
   if (!lot_number) return res.status(400).json({ error: 'Lot number is required' });
 
   const lotId = id || `lot_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
-  const existing = db.prepare('SELECT id FROM stock_lots WHERE id = ?').get(lotId);
+  const existing = db.prepare('SELECT id, quantity FROM stock_lots WHERE id = ?').get(lotId) as any;
 
   try {
     if (existing) {
@@ -321,7 +335,6 @@ router.post('/items/:id/lots', (req, res) => {
           lot_number = ?,
           manufacturing_date = ?,
           expiry_date = ?,
-          quantity = ?,
           physical_location = ?,
           status = ?,
           notes = ?,
@@ -329,7 +342,7 @@ router.post('/items/:id/lots', (req, res) => {
         WHERE id = ?
       `).run(
         lot_number, manufacturing_date || null, expiry_date || null,
-        quantity || 0, physical_location || null, status || 'active',
+        physical_location || null, status || 'active',
         notes || null, lotId
       );
     } else {
@@ -338,15 +351,16 @@ router.post('/items/:id/lots', (req, res) => {
       const branch = db.prepare('SELECT id FROM branches WHERE company_id = ? LIMIT 1').get(compId) as any;
       const branchId = branch_id || (branch ? branch.id : 'bran_1');
 
+      // Saldo do lote inicializa em 0 (saldo operacional agregado permanece em stock_balances)
       db.prepare(`
         INSERT INTO stock_lots (
           id, company_id, branch_id, item_id, lot_number, manufacturing_date, expiry_date,
           quantity, physical_location, status, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
       `).run(
         lotId, compId, branchId, itemId, lot_number,
         manufacturing_date || null, expiry_date || null,
-        quantity || 0, physical_location || null, status || 'active', notes || null
+        physical_location || null, status || 'active', notes || null
       );
     }
 
@@ -383,6 +397,19 @@ router.post('/items/:id/serials', (req, res) => {
   const serialId = id || `ser_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
   const existing = db.prepare('SELECT id FROM stock_serials WHERE id = ?').get(serialId);
 
+  const item = db.prepare('SELECT company_id FROM inventory_items WHERE id = ?').get(itemId) as any;
+  const compId = company_id || (item ? item.company_id : 'comp_1');
+
+  // Proteção contra duplicação de número de série para o produto nesta empresa
+  const duplicate = db.prepare(`
+    SELECT id FROM stock_serials 
+    WHERE company_id = ? AND item_id = ? AND serial_number = ? AND id != ?
+  `).get(compId, itemId, serial_number, serialId);
+
+  if (duplicate) {
+    return res.status(400).json({ error: 'Número de série já cadastrado para este produto.' });
+  }
+
   try {
     if (existing) {
       db.prepare(`
@@ -396,8 +423,6 @@ router.post('/items/:id/serials', (req, res) => {
         WHERE id = ?
       `).run(lot_id || null, serial_number, physical_location || null, status || 'in_stock', notes || null, serialId);
     } else {
-      const item = db.prepare('SELECT company_id FROM inventory_items WHERE id = ?').get(itemId) as any;
-      const compId = company_id || (item ? item.company_id : 'comp_1');
       const branch = db.prepare('SELECT id FROM branches WHERE company_id = ? LIMIT 1').get(compId) as any;
       const branchId = branch_id || (branch ? branch.id : 'bran_1');
 

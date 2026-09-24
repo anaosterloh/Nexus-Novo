@@ -45,71 +45,47 @@ export function ProductLotsModal({ open, onOpenChange, product }: ProductLotsMod
   const [historyOpen, setHistoryOpen] = useState(false);
   const [lots, setLots] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
 
   // Formulário de novo lote
   const [newLotNumber, setNewLotNumber] = useState('');
   const [newMfgDate, setNewMfgDate] = useState('');
   const [newExpDate, setNewExpDate] = useState('');
-  const [newQuantity, setNewQuantity] = useState(10);
   const [newLocation, setNewLocation] = useState('');
-
-  const defaultMockLots = [
-    {
-      id: 'L-001',
-      batchNumber: 'BATCH-2024-001',
-      manufactureDate: '2024-01-15',
-      expiryDate: '2025-01-15',
-      quantity: 50,
-      status: 'active',
-      supplier: 'Fornecedor A',
-      physicalLocation: 'Prateleira A1'
-    },
-    {
-      id: 'L-002',
-      batchNumber: 'BATCH-2024-005',
-      manufactureDate: '2024-02-20',
-      expiryDate: '2025-02-20',
-      quantity: 120,
-      status: 'active',
-      supplier: 'Fornecedor B',
-      physicalLocation: 'Corredor B2'
-    },
-    {
-      id: 'L-003',
-      batchNumber: 'BATCH-2023-098',
-      manufactureDate: '2023-11-10',
-      expiryDate: '2024-11-10',
-      quantity: 5,
-      status: 'expiring',
-      supplier: 'Fornecedor A',
-      physicalLocation: 'Quarentena'
-    }
-  ];
 
   const fetchLots = () => {
     if (!product?.id) return;
     setLoading(true);
+    setErrorMessage(null);
     fetch(`/api/inventory/items/${product.id}/lots`)
-      .then(res => res.json())
+      .then(async (res) => {
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || `Erro HTTP ${res.status}`);
+        }
+        return res.json();
+      })
       .then(data => {
-        if (Array.isArray(data) && data.length > 0) {
+        if (Array.isArray(data)) {
           setLots(data.map(l => ({
             id: l.id,
             batchNumber: l.lot_number || l.batchNumber,
-            manufactureDate: l.manufacturing_date || l.manufactureDate || '2024-01-01',
-            expiryDate: l.expiry_date || l.expiryDate || '2026-01-01',
-            quantity: l.quantity || 0,
+            manufactureDate: l.manufacturing_date || l.manufactureDate || null,
+            expiryDate: l.expiry_date || l.expiryDate || null,
+            quantity: l.quantity ?? 0,
             status: l.status || 'active',
             supplier: l.branch_name || 'Almoxarifado Principal',
             physicalLocation: l.physical_location || ''
           })));
         } else {
-          setLots(defaultMockLots);
+          setLots([]);
         }
       })
-      .catch(() => {
-        setLots(defaultMockLots);
+      .catch((err: any) => {
+        setLots([]);
+        setErrorMessage(err.message || 'Falha ao buscar lotes no servidor');
+        toast.error('Erro ao buscar lotes do produto');
       })
       .finally(() => {
         setLoading(false);
@@ -137,14 +113,13 @@ export function ProductLotsModal({ open, onOpenChange, product }: ProductLotsMod
           lot_number: newLotNumber,
           manufacturing_date: newMfgDate || null,
           expiry_date: newExpDate || null,
-          quantity: newQuantity,
           physical_location: newLocation || null,
           status: 'active'
         })
       });
 
       if (res.ok) {
-        toast.success('Lote criado com sucesso!');
+        toast.success('Lote cadastrado com sucesso!');
         setShowAddForm(false);
         setNewLotNumber('');
         setNewMfgDate('');
@@ -152,7 +127,8 @@ export function ProductLotsModal({ open, onOpenChange, product }: ProductLotsMod
         setNewLocation('');
         fetchLots();
       } else {
-        throw new Error('Falha ao salvar lote');
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Falha ao salvar lote');
       }
     } catch (err: any) {
       toast.error(err.message || 'Erro ao criar lote');
@@ -204,11 +180,18 @@ export function ProductLotsModal({ open, onOpenChange, product }: ProductLotsMod
             </div>
           </div>
 
+          {errorMessage && (
+            <div className="bg-rose-50 border border-rose-200 text-rose-800 text-xs p-3 rounded-lg flex items-center gap-2 mb-2">
+              <AlertCircle className="h-4 w-4 text-rose-600 shrink-0" />
+              <span>{errorMessage}</span>
+            </div>
+          )}
+
           {showAddForm && (
             <form onSubmit={handleCreateLot} className="p-3 bg-zinc-50 dark:bg-zinc-900 border rounded-lg space-y-3 mb-2">
               <div className="text-xs font-bold uppercase tracking-wider text-zinc-500">Cadastrar Novo Lote</div>
               <div className="grid grid-cols-12 gap-3">
-                <div className="col-span-3 space-y-1">
+                <div className="col-span-4 space-y-1">
                   <Label className="text-[10px] uppercase font-bold text-zinc-500">Nº do Lote *</Label>
                   <Input 
                     value={newLotNumber} 
@@ -216,16 +199,6 @@ export function ProductLotsModal({ open, onOpenChange, product }: ProductLotsMod
                     placeholder="Ex: LOT-2026-X" 
                     className="h-8 font-mono text-xs" 
                     required 
-                  />
-                </div>
-                <div className="col-span-2 space-y-1">
-                  <Label className="text-[10px] uppercase font-bold text-zinc-500">Qtd.</Label>
-                  <Input 
-                    type="number" 
-                    value={newQuantity} 
-                    onChange={e => setNewQuantity(Number(e.target.value))} 
-                    className="h-8 text-xs" 
-                    min="1" 
                   />
                 </div>
                 <div className="col-span-2 space-y-1">
@@ -246,8 +219,8 @@ export function ProductLotsModal({ open, onOpenChange, product }: ProductLotsMod
                     className="h-8 text-xs" 
                   />
                 </div>
-                <div className="col-span-3 space-y-1">
-                  <Label className="text-[10px] uppercase font-bold text-zinc-500">Localização</Label>
+                <div className="col-span-4 space-y-1">
+                  <Label className="text-[10px] uppercase font-bold text-zinc-500">Localização Física</Label>
                   <Input 
                     value={newLocation} 
                     onChange={e => setNewLocation(e.target.value)} 
@@ -275,7 +248,7 @@ export function ProductLotsModal({ open, onOpenChange, product }: ProductLotsMod
                   <TableHead>Fabricação</TableHead>
                   <TableHead>Validade</TableHead>
                   <TableHead>Localização</TableHead>
-                  <TableHead className="text-right">Qtd. Atual</TableHead>
+                  <TableHead className="text-right">Qtd. no Lote</TableHead>
                   <TableHead className="text-center">Status</TableHead>
                   <TableHead className="text-right">Ações</TableHead>
                 </TableRow>
@@ -340,10 +313,17 @@ export function ProductLotsModal({ open, onOpenChange, product }: ProductLotsMod
                     </TableRow>
                   );
                 })}
-                {filteredLots.length === 0 && (
+                {filteredLots.length === 0 && !loading && (
                   <TableRow>
-                    <TableCell colSpan={7} className="text-center py-6 text-zinc-400">
-                      Nenhum lote localizado para este produto.
+                    <TableCell colSpan={7} className="text-center py-8 text-zinc-500">
+                      Nenhum lote cadastrado para este produto.
+                    </TableCell>
+                  </TableRow>
+                )}
+                {loading && (
+                  <TableRow>
+                    <TableCell colSpan={7} className="text-center py-8 text-zinc-400">
+                      Carregando lotes...
                     </TableCell>
                   </TableRow>
                 )}
@@ -355,7 +335,7 @@ export function ProductLotsModal({ open, onOpenChange, product }: ProductLotsMod
             <AlertCircle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
             <div className="text-xs text-amber-800">
               <p className="font-bold mb-1">Fundação de Rastreabilidade Nexus</p>
-              <p>Lotes e números de série registram movimentações rastreadas individualmente. Saldo agregado e histórico de transações são mantidos em sincronia.</p>
+              <p>O saldo operacional oficial continua sendo mantido e calculado via <strong>stock_balances</strong>. O cadastro de lotes registra os metadados de rastreabilidade (código, datas e localização física) sem criar saldos arbitrários independentes.</p>
             </div>
           </div>
         </DialogContent>

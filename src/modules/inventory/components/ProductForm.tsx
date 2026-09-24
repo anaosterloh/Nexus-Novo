@@ -34,9 +34,11 @@ const productSchema = z.object({
   category: z.string().min(1, 'Selecione uma categoria'),
   unit: z.string().min(1, 'Selecione a unidade'),
   status: z.enum(['active', 'inactive', 'discontinued']),
-  item_type: z.enum(['simple', 'batch', 'serial', 'kit', 'raw_material']),
+  item_type: z.enum(['sale', 'part', 'consumable']),
   tracks_batch: z.boolean(),
   tracks_serial: z.boolean(),
+  tracks_expiry: z.boolean(),
+  tracks_manufacturing_date: z.boolean(),
   is_composite: z.boolean(),
   costPrice: z.number().min(0, 'Preço de custo deve ser maior ou igual a 0'),
   sellingPrice: z.number().min(0, 'Preço de venda deve ser maior ou igual a 0'),
@@ -60,7 +62,7 @@ const productSchema = z.object({
   batches: z.array(z.object({
     id: z.string(),
     batchNumber: z.string(),
-    quantity: z.number(),
+    quantity: z.number().optional(),
     manufacturingDate: z.string().optional(),
     expiryDate: z.string().optional(),
     status: z.enum(['active', 'blocked', 'expired', 'recalled']),
@@ -153,14 +155,22 @@ export function ProductForm({ open, onOpenChange, onSuccess, product, initialDes
     toast.success('Guia Tributário salvo com sucesso!');
   };
 
+  const parseItemType = (type?: string): 'sale' | 'part' | 'consumable' => {
+    if (type === 'part' || type === 'consumable' || type === 'sale') return type;
+    if (type === 'raw_material') return 'consumable';
+    return 'sale';
+  };
+
   const form = useForm<ProductFormValues>({
     resolver: zodResolver(productSchema),
     defaultValues: product ? {
       status: 'active',
-      item_type: product.item_type || 'simple',
-      tracks_batch: Boolean(product.tracks_batch),
-      tracks_serial: Boolean(product.tracks_serial),
-      is_composite: Boolean(product.is_composite),
+      item_type: parseItemType(product.item_type),
+      tracks_batch: Boolean(product.tracks_batch || product.item_type === 'batch'),
+      tracks_serial: Boolean(product.tracks_serial || product.item_type === 'serial'),
+      tracks_expiry: Boolean(product.tracks_expiry),
+      tracks_manufacturing_date: Boolean(product.tracks_manufacturing_date),
+      is_composite: Boolean(product.is_composite || product.item_type === 'kit'),
       costPrice: product.cost_price !== undefined ? product.cost_price : (product.costPrice || 0),
       sellingPrice: product.selling_price !== undefined ? product.selling_price : (product.sellingPrice || 0),
       minSellingPrice: product.min_selling_price !== undefined ? product.min_selling_price : (product.minSellingPrice || 0),
@@ -176,9 +186,11 @@ export function ProductForm({ open, onOpenChange, onSuccess, product, initialDes
       category: '',
       unit: 'UN',
       status: 'active',
-      item_type: 'simple',
+      item_type: 'sale',
       tracks_batch: false,
       tracks_serial: false,
+      tracks_expiry: false,
+      tracks_manufacturing_date: false,
       is_composite: false,
       costPrice: 0,
       sellingPrice: 0,
@@ -200,10 +212,12 @@ export function ProductForm({ open, onOpenChange, onSuccess, product, initialDes
     if (product) {
       form.reset({
         status: 'active',
-        item_type: product.item_type || 'simple',
-        tracks_batch: Boolean(product.tracks_batch),
-        tracks_serial: Boolean(product.tracks_serial),
-        is_composite: Boolean(product.is_composite),
+        item_type: parseItemType(product.item_type),
+        tracks_batch: Boolean(product.tracks_batch || product.item_type === 'batch'),
+        tracks_serial: Boolean(product.tracks_serial || product.item_type === 'serial'),
+        tracks_expiry: Boolean(product.tracks_expiry),
+        tracks_manufacturing_date: Boolean(product.tracks_manufacturing_date),
+        is_composite: Boolean(product.is_composite || product.item_type === 'kit'),
         costPrice: product.cost_price !== undefined ? product.cost_price : (product.costPrice || 0),
         sellingPrice: product.selling_price !== undefined ? product.selling_price : (product.sellingPrice || 0),
         minSellingPrice: product.min_selling_price !== undefined ? product.min_selling_price : (product.minSellingPrice || 0),
@@ -221,9 +235,11 @@ export function ProductForm({ open, onOpenChange, onSuccess, product, initialDes
         category: '',
         unit: 'UN',
         status: 'active',
-        item_type: 'simple',
+        item_type: 'sale',
         tracks_batch: false,
         tracks_serial: false,
+        tracks_expiry: false,
+        tracks_manufacturing_date: false,
         is_composite: false,
         costPrice: 0,
         sellingPrice: 0,
@@ -264,6 +280,8 @@ export function ProductForm({ open, onOpenChange, onSuccess, product, initialDes
         item_type: values.item_type,
         tracks_batch: values.tracks_batch ? 1 : 0,
         tracks_serial: values.tracks_serial ? 1 : 0,
+        tracks_expiry: values.tracks_expiry ? 1 : 0,
+        tracks_manufacturing_date: values.tracks_manufacturing_date ? 1 : 0,
         is_composite: values.is_composite ? 1 : 0,
         cost_price: values.costPrice,
         selling_price: values.sellingPrice,
@@ -292,25 +310,12 @@ export function ProductForm({ open, onOpenChange, onSuccess, product, initialDes
         throw new Error('Falha ao salvar produto no servidor');
       }
 
-      // Espelhar no localStorage para compatibilidade offline
-      const existingItemsStr = localStorage.getItem('nexus_inventory_items');
-      let items = existingItemsStr ? JSON.parse(existingItemsStr) : [];
-      
       if (product) {
-        items = items.map((item: any) => item.id === product.id ? { ...item, ...values } : item);
         toast.success('Produto atualizado com sucesso!');
       } else {
-        const newItem = {
-          id: `PROD-${Date.now()}`,
-          ...values,
-          total_quantity: 0,
-          companyId: currentCompany.id
-        };
-        items.push(newItem);
         toast.success('Produto cadastrado com sucesso!');
       }
 
-      localStorage.setItem('nexus_inventory_items', JSON.stringify(items));
       onSuccess();
       onOpenChange(false);
     } catch (error: any) {
@@ -431,37 +436,28 @@ export function ProductForm({ open, onOpenChange, onSuccess, product, initialDes
                     </div>
 
                     <div className="grid grid-cols-12 gap-4">
-                      <div className="col-span-6 space-y-2">
-                        <Label className="text-[10px] uppercase font-bold text-zinc-500">Tipo / Classificação do Item</Label>
+                      <div className="col-span-5 space-y-2">
+                        <Label className="text-[10px] uppercase font-bold text-zinc-500">Classificação Comercial / Operacional</Label>
                         <Select 
                           value={form.watch('item_type')} 
                           onValueChange={(val: any) => {
                             form.setValue('item_type', val);
-                            if (val === 'batch') {
-                              form.setValue('tracks_batch', true);
-                            } else if (val === 'serial') {
-                              form.setValue('tracks_serial', true);
-                            } else if (val === 'kit') {
-                              form.setValue('is_composite', true);
-                            }
                           }}
                         >
                           <SelectTrigger className="h-10">
                             <SelectValue placeholder="Selecione a classificação" />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="simple">Produto Padrão (Sem rastreamento extra)</SelectItem>
-                            <SelectItem value="batch">Controlado por Lote (Validade / Fabricação)</SelectItem>
-                            <SelectItem value="serial">Serializado (Nº de Série Unitário)</SelectItem>
-                            <SelectItem value="kit">Kit / Conjunto Físico (Montagem com BOM)</SelectItem>
-                            <SelectItem value="raw_material">Insumo / Matéria-Prima</SelectItem>
+                            <SelectItem value="sale">Venda / Revenda (Comercial)</SelectItem>
+                            <SelectItem value="part">Peça / Componente</SelectItem>
+                            <SelectItem value="consumable">Consumo / Insumo Operacional</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
 
-                      <div className="col-span-6 flex flex-col justify-end gap-2 pb-1">
-                        <Label className="text-[10px] uppercase font-bold text-zinc-500">Controles Rastreáveis Ativos</Label>
-                        <div className="flex items-center gap-4 flex-wrap pt-1">
+                      <div className="col-span-7 flex flex-col justify-end gap-2 pb-1">
+                        <Label className="text-[10px] uppercase font-bold text-zinc-500">Controles de Rastreabilidade & Composição</Label>
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-2 pt-1">
                           <label className="flex items-center gap-2 text-xs font-medium cursor-pointer">
                             <input 
                               type="checkbox" 
@@ -469,7 +465,7 @@ export function ProductForm({ open, onOpenChange, onSuccess, product, initialDes
                               onChange={(e) => form.setValue('tracks_batch', e.target.checked)}
                               className="rounded text-emerald-600 focus:ring-emerald-500 h-4 w-4"
                             />
-                            Rastrear Lote
+                            Controlar Lote
                           </label>
                           <label className="flex items-center gap-2 text-xs font-medium cursor-pointer">
                             <input 
@@ -478,16 +474,34 @@ export function ProductForm({ open, onOpenChange, onSuccess, product, initialDes
                               onChange={(e) => form.setValue('tracks_serial', e.target.checked)}
                               className="rounded text-emerald-600 focus:ring-emerald-500 h-4 w-4"
                             />
-                            Rastrear Nº Serial
+                            Controlar Nº de Série
                           </label>
                           <label className="flex items-center gap-2 text-xs font-medium cursor-pointer">
+                            <input 
+                              type="checkbox" 
+                              checked={form.watch('tracks_expiry')} 
+                              onChange={(e) => form.setValue('tracks_expiry', e.target.checked)}
+                              className="rounded text-emerald-600 focus:ring-emerald-500 h-4 w-4"
+                            />
+                            Exigir Data de Validade
+                          </label>
+                          <label className="flex items-center gap-2 text-xs font-medium cursor-pointer">
+                            <input 
+                              type="checkbox" 
+                              checked={form.watch('tracks_manufacturing_date')} 
+                              onChange={(e) => form.setValue('tracks_manufacturing_date', e.target.checked)}
+                              className="rounded text-emerald-600 focus:ring-emerald-500 h-4 w-4"
+                            />
+                            Exigir Data de Fabricação
+                          </label>
+                          <label className="flex items-center gap-2 text-xs font-medium cursor-pointer col-span-2 pt-0.5">
                             <input 
                               type="checkbox" 
                               checked={form.watch('is_composite')} 
                               onChange={(e) => form.setValue('is_composite', e.target.checked)}
                               className="rounded text-emerald-600 focus:ring-emerald-500 h-4 w-4"
                             />
-                            Composição (BOM)
+                            Item Composto / Composição (BOM)
                           </label>
                         </div>
                       </div>
@@ -538,7 +552,7 @@ export function ProductForm({ open, onOpenChange, onSuccess, product, initialDes
                   <div className="flex items-center justify-between">
                     <div>
                       <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-500">Gestão de Lotes & Rastreabilidade</h3>
-                      <p className="text-xs text-zinc-400">Controle de validade, fabricação e histórico de lotes.</p>
+                      <p className="text-xs text-zinc-400">Identificação e datas de validade/fabricação. O saldo agregado oficial permanece em stock_balances.</p>
                     </div>
                     <Button type="button" variant="outline" size="sm" className="gap-2" onClick={() => {
                       const currentBatches = form.getValues('batches') || [];
@@ -565,7 +579,7 @@ export function ProductForm({ open, onOpenChange, onSuccess, product, initialDes
                       <div key={batch.id || index} className="p-4 rounded-lg border bg-white dark:bg-zinc-950 space-y-4">
                         <div className="grid grid-cols-12 gap-4">
                           <div className="col-span-3 space-y-2">
-                            <Label className="text-[10px] uppercase font-bold text-zinc-500">Nº Lote</Label>
+                            <Label className="text-[10px] uppercase font-bold text-zinc-500">Nº Lote *</Label>
                             <Input 
                               value={batch.batchNumber} 
                               onChange={(e) => {
@@ -577,24 +591,24 @@ export function ProductForm({ open, onOpenChange, onSuccess, product, initialDes
                               placeholder="LOTE-000"
                             />
                           </div>
-                          <div className="col-span-2 space-y-2">
-                            <Label className="text-[10px] uppercase font-bold text-zinc-500">Qtd.</Label>
+                          <div className="col-span-3 space-y-2">
+                            <Label className="text-[10px] uppercase font-bold text-zinc-500">Data de Fabricação</Label>
                             <Input 
-                              type="number"
-                              value={batch.quantity}
+                              type="date" 
+                              value={batch.manufacturingDate || ''} 
                               onChange={(e) => {
                                 const newBatches = [...(form.getValues('batches') || [])];
-                                newBatches[index].quantity = Number(e.target.value);
+                                newBatches[index].manufacturingDate = e.target.value;
                                 form.setValue('batches', newBatches);
                               }}
-                              className="h-9"
+                              className="h-9" 
                             />
                           </div>
-                          <div className="col-span-2 space-y-2">
-                            <Label className="text-[10px] uppercase font-bold text-zinc-500">Validade</Label>
+                          <div className="col-span-3 space-y-2">
+                            <Label className="text-[10px] uppercase font-bold text-zinc-500">Data de Validade</Label>
                             <Input 
                               type="date"
-                              value={batch.expiryDate}
+                              value={batch.expiryDate || ''}
                               onChange={(e) => {
                                 const newBatches = [...(form.getValues('batches') || [])];
                                 newBatches[index].expiryDate = e.target.value;

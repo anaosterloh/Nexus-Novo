@@ -55,6 +55,8 @@ interface InventoryItem {
   item_type?: string;
   tracks_batch?: number | boolean;
   tracks_serial?: number | boolean;
+  tracks_expiry?: number | boolean;
+  tracks_manufacturing_date?: number | boolean;
   is_composite?: number | boolean;
   physical_location?: string;
   costPrice?: number;
@@ -335,19 +337,29 @@ export function InventoryList() {
                     <TableCell className="font-medium">
                       <div className="flex items-center gap-1.5 flex-wrap">
                         <span>{item.description}</span>
-                        {item.item_type === 'kit' && (
+                        {Boolean(item.is_composite || item.item_type === 'kit') && (
                           <Badge variant="outline" className="text-[10px] py-0 h-4 bg-purple-50 text-purple-700 border-purple-200">
                             Kit
                           </Badge>
                         )}
-                        {item.item_type === 'batch' && (
+                        {Boolean(item.tracks_batch || item.item_type === 'batch') && (
                           <Badge variant="outline" className="text-[10px] py-0 h-4 bg-blue-50 text-blue-700 border-blue-200">
                             Lote
                           </Badge>
                         )}
-                        {item.item_type === 'serial' && (
+                        {Boolean(item.tracks_serial || item.item_type === 'serial') && (
                           <Badge variant="outline" className="text-[10px] py-0 h-4 bg-amber-50 text-amber-700 border-amber-200">
                             Serial
+                          </Badge>
+                        )}
+                        {item.item_type === 'part' && (
+                          <Badge variant="outline" className="text-[10px] py-0 h-4 bg-slate-50 text-slate-700 border-slate-200">
+                            Peça
+                          </Badge>
+                        )}
+                        {(item.item_type === 'consumable' || item.item_type === 'raw_material') && (
+                          <Badge variant="outline" className="text-[10px] py-0 h-4 bg-zinc-100 text-zinc-700 border-zinc-200">
+                            Consumo
                           </Badge>
                         )}
                       </div>
@@ -419,19 +431,29 @@ export function InventoryList() {
                               </Button>
                             )}
                             <h3 className="font-bold text-zinc-900 dark:text-zinc-100 truncate">{item.description}</h3>
-                            {item.item_type === 'kit' && (
+                            {Boolean(item.is_composite || item.item_type === 'kit') && (
                               <Badge variant="outline" className="text-[9px] py-0 h-4 bg-purple-50 text-purple-700 border-purple-200">
                                 Kit
                               </Badge>
                             )}
-                            {item.item_type === 'batch' && (
+                            {Boolean(item.tracks_batch || item.item_type === 'batch') && (
                               <Badge variant="outline" className="text-[9px] py-0 h-4 bg-blue-50 text-blue-700 border-blue-200">
                                 Lote
                               </Badge>
                             )}
-                            {item.item_type === 'serial' && (
+                            {Boolean(item.tracks_serial || item.item_type === 'serial') && (
                               <Badge variant="outline" className="text-[9px] py-0 h-4 bg-amber-50 text-amber-700 border-amber-200">
                                 Serial
+                              </Badge>
+                            )}
+                            {item.item_type === 'part' && (
+                              <Badge variant="outline" className="text-[9px] py-0 h-4 bg-slate-50 text-slate-700 border-slate-200">
+                                Peça
+                              </Badge>
+                            )}
+                            {(item.item_type === 'consumable' || item.item_type === 'raw_material') && (
+                              <Badge variant="outline" className="text-[9px] py-0 h-4 bg-zinc-100 text-zinc-700 border-zinc-200">
+                                Consumo
                               </Badge>
                             )}
                           </div>
