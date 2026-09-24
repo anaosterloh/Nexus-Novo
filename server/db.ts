@@ -368,7 +368,29 @@ export function initDb() {
   db.exec('CREATE INDEX IF NOT EXISTS idx_stock_serials_lot ON stock_serials(lot_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_stock_serials_num ON stock_serials(serial_number)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_stock_serials_status ON stock_serials(status)');
-  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_serials_unique ON stock_serials(company_id, item_id, serial_number)');
+
+  // Unicidade de número de série segura para bases existentes com proteção contra falhas de migração
+  try {
+    const serialDuplicates = db.prepare(`
+      SELECT company_id, item_id, serial_number, COUNT(*) as cnt 
+      FROM stock_serials 
+      GROUP BY company_id, item_id, serial_number 
+      HAVING cnt > 1
+    `).all() as any[];
+
+    if (serialDuplicates.length === 0) {
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_serials_unique ON stock_serials(company_id, item_id, serial_number)');
+    } else {
+      console.warn(
+        `[AVISO ESTOQUE] Existem ${serialDuplicates.length} grupo(s) de números de série duplicados em stock_serials no banco legado. ` +
+        `O índice UNIQUE não foi aplicado nesta inicialização para proteger os dados existentes sem exclusão automática. ` +
+        `É necessária revisão manual desses registros antes de aplicar a restrição definitiva. ` +
+        `A proteção da API continua ativa impedindo novos registros duplicados.`
+      );
+    }
+  } catch (err) {
+    console.warn('[AVISO ESTOQUE] Falha ao verificar/aplicar índice de unicidade de stock_serials:', err);
+  }
 
   // 5. Reservas Rastreáveis de Estoque (sem alterar confirmação imediata existente)
   db.exec(`

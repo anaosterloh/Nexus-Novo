@@ -229,17 +229,11 @@ export function ProductDetailsModal({ open, onOpenChange, product }: ProductDeta
                       </div>
 
                       <div className="border rounded-lg p-4">
-                        <h3 className="font-bold text-sm text-zinc-500 mb-4">Lotes Próximos do Vencimento</h3>
-                        <div className="space-y-3">
-                          <div className="flex items-center justify-between text-sm p-2 bg-rose-50 rounded border border-rose-100 text-rose-700">
-                            <div className="flex flex-col">
-                              <span className="font-bold text-xs">LOTE-2023-098</span>
-                              <span className="text-[10px]">Vence em 10 dias</span>
-                            </div>
-                            <span className="font-bold">5 UN</span>
-                          </div>
+                        <h3 className="font-bold text-sm text-zinc-500 mb-3">Lotes Próximos do Vencimento</h3>
+                        <div className="py-4 text-center">
+                          <p className="text-xs text-zinc-400">Nenhum alerta de validade disponível.</p>
                         </div>
-                        <Button variant="link" className="w-full text-xs mt-2 h-auto p-0" onClick={() => setLotsModalOpen(true)}>
+                        <Button variant="link" className="w-full text-xs mt-1 h-auto p-0 text-emerald-600" onClick={() => setLotsModalOpen(true)}>
                           Ver todos os lotes
                         </Button>
                       </div>

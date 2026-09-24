@@ -248,7 +248,6 @@ export function ProductLotsModal({ open, onOpenChange, product }: ProductLotsMod
                   <TableHead>Fabricação</TableHead>
                   <TableHead>Validade</TableHead>
                   <TableHead>Localização</TableHead>
-                  <TableHead className="text-right">Qtd. no Lote</TableHead>
                   <TableHead className="text-center">Status</TableHead>
                   <TableHead className="text-right">Ações</TableHead>
                 </TableRow>
@@ -288,9 +287,6 @@ export function ProductLotsModal({ open, onOpenChange, product }: ProductLotsMod
                           <span className="text-zinc-400">-</span>
                         )}
                       </TableCell>
-                      <TableCell className="text-right font-bold">
-                        {lot.quantity}
-                      </TableCell>
                       <TableCell className="text-center">
                         <Badge 
                           variant={lot.status === 'active' ? 'outline' : 'destructive'} 
@@ -315,14 +311,14 @@ export function ProductLotsModal({ open, onOpenChange, product }: ProductLotsMod
                 })}
                 {filteredLots.length === 0 && !loading && (
                   <TableRow>
-                    <TableCell colSpan={7} className="text-center py-8 text-zinc-500">
+                    <TableCell colSpan={6} className="text-center py-8 text-zinc-500">
                       Nenhum lote cadastrado para este produto.
                     </TableCell>
                   </TableRow>
                 )}
                 {loading && (
                   <TableRow>
-                    <TableCell colSpan={7} className="text-center py-8 text-zinc-400">
+                    <TableCell colSpan={6} className="text-center py-8 text-zinc-400">
                       Carregando lotes...
                     </TableCell>
                   </TableRow>

@@ -607,74 +607,11 @@ router.get('/assemblies', (req, res) => {
   res.json(assemblies);
 });
 
-// 13. Kit Assemblies & Genealogy: Record kit assembly (genealogy of components)
+// 13. Kit Assemblies & Genealogy: Record kit assembly (bloqueado até implementação transacional de estoque)
 router.post('/assemblies', (req, res) => {
-  const { 
-    companyId, 
-    branchId, 
-    parentItemId, 
-    outputLotNumber, 
-    outputSerialNumber, 
-    quantity, 
-    notes, 
-    createdBy, 
-    consumedItems 
-  } = req.body;
-
-  if (!parentItemId || !quantity) {
-    return res.status(400).json({ error: 'Parent item ID and quantity are required' });
-  }
-
-  const assemblyId = `asm_${Date.now()}`;
-  const item = db.prepare('SELECT company_id FROM inventory_items WHERE id = ?').get(parentItemId) as any;
-  const compId = companyId || (item ? item.company_id : 'comp_1');
-  const branch = db.prepare('SELECT id FROM branches WHERE company_id = ? LIMIT 1').get(compId) as any;
-  const branId = branchId || (branch ? branch.id : 'bran_1');
-
-  try {
-    db.transaction(() => {
-      let outputLotId = null;
-      let outputSerialId = null;
-
-      if (outputLotNumber) {
-        outputLotId = `lot_kit_${Date.now()}`;
-        db.prepare(`
-          INSERT INTO stock_lots (id, company_id, branch_id, item_id, lot_number, quantity, status, notes)
-          VALUES (?, ?, ?, ?, ?, ?, 'active', 'Gerado por montagem de kit')
-        `).run(outputLotId, compId, branId, parentItemId, outputLotNumber, quantity);
-      }
-
-      if (outputSerialNumber) {
-        outputSerialId = `ser_kit_${Date.now()}`;
-        db.prepare(`
-          INSERT INTO stock_serials (id, company_id, branch_id, item_id, lot_id, serial_number, status, notes)
-          VALUES (?, ?, ?, ?, ?, ?, 'in_stock', 'Gerado por montagem de kit')
-        `).run(outputSerialId, compId, branId, parentItemId, outputLotId, outputSerialNumber);
-      }
-
-      db.prepare(`
-        INSERT INTO kit_assemblies (
-          id, company_id, branch_id, parent_item_id, output_lot_id, output_serial_id, quantity, status, notes, created_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)
-      `).run(assemblyId, compId, branId, parentItemId, outputLotId, outputSerialId, quantity, notes || null, createdBy || 'user_1');
-
-      if (Array.isArray(consumedItems)) {
-        for (const ci of consumedItems) {
-          const kaiId = `kai_${assemblyId}_${Math.random().toString(36).substr(2, 6)}`;
-          db.prepare(`
-            INSERT INTO kit_assembly_items (
-              id, assembly_id, component_item_id, quantity, consumed_lot_id, consumed_serial_id
-            ) VALUES (?, ?, ?, ?, ?, ?)
-          `).run(kaiId, assemblyId, ci.component_item_id, ci.quantity, ci.consumed_lot_id || null, ci.consumed_serial_id || null);
-        }
-      }
-    })();
-
-    res.json({ success: true, assemblyId });
-  } catch (err: any) {
-    console.error('Error recording assembly:', err);
-    res.status(500).json({ error: err.message || 'Failed to record assembly' });
-  }
+  return res.status(409).json({
+    error: 'A montagem física de kits ainda não está habilitada. A estrutura de BOM e genealogia está disponível, mas a conclusão dependerá da implementação transacional de movimentação de estoque.'
+  });
 });
 
 // 14. Get stock balance for a specific branch
@@ -725,16 +662,14 @@ router.post('/entry', (req, res) => {
         .run(branchId, itemId, quantity, cost || 0);
     }
 
-    // 2.1 If lot specified or lot number given, update or create stock_lots
+    // 2.1 If lot specified or lot number given, resolve lot_id for structured movement tracking
+    // (Não atualizamos stock_lots.quantity como segundo saldo operacional nesta etapa)
     let finalLotId = lotId || null;
     if (lotNumber && !finalLotId) {
       const existingLot = db.prepare('SELECT id FROM stock_lots WHERE item_id = ? AND lot_number = ?').get(itemId, lotNumber) as any;
       if (existingLot) {
         finalLotId = existingLot.id;
-        db.prepare('UPDATE stock_lots SET quantity = quantity + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(quantity, finalLotId);
       }
-    } else if (finalLotId) {
-      db.prepare('UPDATE stock_lots SET quantity = quantity + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(quantity, finalLotId);
     }
 
     // 2.2 If serial specified, update serial status
