@@ -1,5 +1,6 @@
 import express from 'express';
 import db from '../db';
+import { applyStockPositionDelta } from '../services/stockPositions';
 
 const router = express.Router();
 
@@ -662,6 +663,15 @@ router.post('/entry', (req, res) => {
         .run(branchId, itemId, quantity, cost || 0);
     }
 
+    // 2.3 Apply delta to physical stock positions (SALDO LEGADO / NÃO ALOCADO em AVAILABLE)
+    applyStockPositionDelta({
+      branchId,
+      itemId,
+      deltaQuantity: quantity,
+      state: 'AVAILABLE',
+      lotId: null
+    });
+
     // 2.1 If lot specified or lot number given, resolve lot_id for structured movement tracking
     // (Não atualizamos stock_lots.quantity como segundo saldo operacional nesta etapa)
     let finalLotId = lotId || null;
@@ -747,6 +757,141 @@ router.get('/movements/:itemId', (req, res) => {
 
   const movements = db.prepare(query).all(...params);
   res.json(movements);
+});
+
+// 17. Stock Locations: List
+router.get('/locations', (req, res) => {
+  const { companyId, branchId } = req.query;
+  let query = `
+    SELECT 
+      l.*, 
+      b.name as branch_name,
+      p.name as parent_name
+    FROM stock_locations l
+    LEFT JOIN branches b ON l.branch_id = b.id
+    LEFT JOIN stock_locations p ON l.parent_id = p.id
+    WHERE 1=1
+  `;
+  const params: any[] = [];
+  if (companyId) {
+    query += ' AND l.company_id = ?';
+    params.push(companyId);
+  }
+  if (branchId) {
+    query += ' AND l.branch_id = ?';
+    params.push(branchId);
+  }
+  query += ' ORDER BY l.name ASC';
+
+  const locations = db.prepare(query).all(...params);
+  res.json(locations);
+});
+
+// 18. Stock Locations: Create manual physical location
+router.post('/locations', (req, res) => {
+  const { company_id, branch_id, parent_id, name, code, system_key, status } = req.body;
+
+  if (!name || !name.trim()) {
+    return res.status(400).json({ error: 'Nome da localização é obrigatório' });
+  }
+  if (!branch_id) {
+    return res.status(400).json({ error: 'Filial é obrigatória' });
+  }
+
+  // Não permitir criação de localização técnica reservada manualmente
+  if (system_key && system_key.toUpperCase() === 'LEGACY_UNALLOCATED') {
+    return res.status(400).json({ error: "A chave de sistema 'LEGACY_UNALLOCATED' é reservada para a localização técnica do sistema." });
+  }
+
+  // Resolver company_id
+  let resolvedCompanyId = company_id;
+  if (!resolvedCompanyId) {
+    const branch = db.prepare('SELECT company_id FROM branches WHERE id = ?').get(branch_id) as any;
+    resolvedCompanyId = branch ? branch.company_id : 'comp_1';
+  }
+
+  // Validação de parent_id se fornecido
+  if (parent_id) {
+    const parent = db.prepare('SELECT * FROM stock_locations WHERE id = ?').get(parent_id) as any;
+    if (!parent) {
+      return res.status(400).json({ error: 'Localização pai não encontrada.' });
+    }
+    if (parent.branch_id !== branch_id || parent.company_id !== resolvedCompanyId) {
+      return res.status(400).json({ error: 'A localização pai deve pertencer à mesma empresa e filial.' });
+    }
+  }
+
+  const id = `loc_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
+
+  try {
+    db.prepare(`
+      INSERT INTO stock_locations (
+        id, company_id, branch_id, parent_id, name, code, system_key, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `).run(
+      id,
+      resolvedCompanyId,
+      branch_id,
+      parent_id || null,
+      name.trim(),
+      code ? code.trim() : null,
+      system_key ? system_key.trim() : null,
+      status || 'active'
+    );
+
+    const saved = db.prepare('SELECT * FROM stock_locations WHERE id = ?').get(id);
+    res.json(saved);
+  } catch (err: any) {
+    console.error('Error creating location:', err);
+    res.status(500).json({ error: err.message || 'Falha ao criar localização' });
+  }
+});
+
+// 19. Stock Positions: List physical stock details
+router.get('/positions', (req, res) => {
+  const { companyId, branchId, itemId, locationId, state } = req.query;
+  let query = `
+    SELECT 
+      p.*, 
+      i.code as item_code, 
+      i.description as item_description,
+      i.unit as item_unit,
+      loc.name as location_name,
+      loc.system_key as location_system_key,
+      l.lot_number,
+      b.name as branch_name
+    FROM stock_positions p
+    JOIN inventory_items i ON p.item_id = i.id
+    JOIN stock_locations loc ON p.location_id = loc.id
+    LEFT JOIN branches b ON p.branch_id = b.id
+    LEFT JOIN stock_lots l ON p.lot_id = l.id
+    WHERE 1=1
+  `;
+  const params: any[] = [];
+  if (companyId) {
+    query += ' AND p.company_id = ?';
+    params.push(companyId);
+  }
+  if (branchId) {
+    query += ' AND p.branch_id = ?';
+    params.push(branchId);
+  }
+  if (itemId) {
+    query += ' AND p.item_id = ?';
+    params.push(itemId);
+  }
+  if (locationId) {
+    query += ' AND p.location_id = ?';
+    params.push(locationId);
+  }
+  if (state) {
+    query += ' AND p.state = ?';
+    params.push(state);
+  }
+  query += ' ORDER BY i.description ASC, p.created_at ASC';
+
+  const positions = db.prepare(query).all(...params);
+  res.json(positions);
 });
 
 export default router;

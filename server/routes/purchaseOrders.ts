@@ -1,5 +1,6 @@
 import express from 'express';
 import db from '../db';
+import { applyStockPositionDelta } from '../services/stockPositions';
 
 const router = express.Router();
 
@@ -95,6 +96,16 @@ router.put('/:orderId/confirm', (req, res) => {
         db.prepare('INSERT INTO stock_balances (branch_id, item_id, quantity) VALUES (?, ?, ?)')
           .run(order.branch_id, item.item_id, newQty);
       }
+
+      // Apply delta to physical stock positions (SALDO LEGADO / NÃO ALOCADO em AVAILABLE)
+      applyStockPositionDelta({
+        companyId: order.company_id,
+        branchId: order.branch_id,
+        itemId: item.item_id,
+        deltaQuantity: item.quantity,
+        state: 'AVAILABLE',
+        lotId: null
+      });
 
       // Record movement
       db.prepare(`

@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import bcrypt from 'bcryptjs';
+import { migrateStockBalancesToPositions } from './services/stockPositions';
 
 let dirName: string;
 try {
@@ -487,6 +488,57 @@ export function initDb() {
 
   db.exec('CREATE INDEX IF NOT EXISTS idx_kit_item_asm ON kit_assembly_items(assembly_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_kit_item_comp ON kit_assembly_items(component_item_id)');
+
+  // 9. Localizações Físicas de Estoque (Estrutura física persistente)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS stock_locations (
+      id TEXT PRIMARY KEY,
+      company_id TEXT NOT NULL,
+      branch_id TEXT NOT NULL,
+      parent_id TEXT,
+      name TEXT NOT NULL,
+      code TEXT,
+      system_key TEXT,
+      status TEXT DEFAULT 'active',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (company_id) REFERENCES companies(id),
+      FOREIGN KEY (branch_id) REFERENCES branches(id),
+      FOREIGN KEY (parent_id) REFERENCES stock_locations(id)
+    )
+  `);
+
+  db.exec('CREATE INDEX IF NOT EXISTS idx_stock_locations_comp ON stock_locations(company_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_stock_locations_branch ON stock_locations(branch_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_stock_locations_parent ON stock_locations(parent_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_stock_locations_syskey ON stock_locations(branch_id, system_key)');
+
+  // 10. Posições Físicas de Estoque (Detalhe físico operacional)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS stock_positions (
+      id TEXT PRIMARY KEY,
+      company_id TEXT NOT NULL,
+      branch_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      lot_id TEXT,
+      location_id TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'AVAILABLE', -- 'AVAILABLE', 'QUARANTINE', 'MAINTENANCE', 'PENDING_DISPOSAL'
+      quantity REAL NOT NULL DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (company_id) REFERENCES companies(id),
+      FOREIGN KEY (branch_id) REFERENCES branches(id),
+      FOREIGN KEY (item_id) REFERENCES inventory_items(id),
+      FOREIGN KEY (lot_id) REFERENCES stock_lots(id),
+      FOREIGN KEY (location_id) REFERENCES stock_locations(id)
+    )
+  `);
+
+  db.exec('CREATE INDEX IF NOT EXISTS idx_stock_positions_comp ON stock_positions(company_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_stock_positions_branch_item ON stock_positions(branch_id, item_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_stock_positions_location ON stock_positions(location_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_stock_positions_lot ON stock_positions(lot_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_stock_positions_state ON stock_positions(state)');
 
   // Purchase Requests (Solicitações de Compra)
   db.exec(`
@@ -1269,6 +1321,8 @@ export function initDb() {
 
   seedNotificationParams();
   migrateToEntities();
+  // Migração segura e idempotente de stock_balances para stock_positions (SALDO LEGADO / NÃO ALOCADO)
+  migrateStockBalancesToPositions(db);
   // seedTraceableStockFoundation() desativado na inicialização padrão conforme especificação
 }
 
