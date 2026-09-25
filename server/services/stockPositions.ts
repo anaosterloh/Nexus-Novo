@@ -188,6 +188,69 @@ export function applyStockPositionDelta(
 }
 
 /**
+ * Aplica um delta de quantidade a uma posição física específica por ID.
+ * Usado pelo Picking / Expedição onde a posição exata já foi determinada e alocada.
+ */
+export function applyStockPositionDeltaById(
+  params: {
+    positionId: string;
+    deltaQuantity: number;
+    expectedBranchId?: string;
+    expectedItemId?: string;
+    expectedState?: 'AVAILABLE' | 'QUARANTINE' | 'MAINTENANCE' | 'PENDING_DISPOSAL';
+  },
+  database: any = db
+): {
+  positionId: string;
+  previousQuantity: number;
+  newQuantity: number;
+  locationId: string;
+  state: string;
+} {
+  const { positionId, deltaQuantity, expectedBranchId, expectedItemId, expectedState } = params;
+
+  const position = database.prepare('SELECT * FROM stock_positions WHERE id = ?').get(positionId) as StockPosition | undefined;
+  if (!position) {
+    throw new Error(`Posição física não encontrada: ${positionId}`);
+  }
+
+  if (expectedBranchId && position.branch_id !== expectedBranchId) {
+    throw new Error(`Filial da posição física (${position.branch_id}) diverge da filial esperada (${expectedBranchId})`);
+  }
+
+  if (expectedItemId && position.item_id !== expectedItemId) {
+    throw new Error(`Item da posição física (${position.item_id}) diverge do item esperado (${expectedItemId})`);
+  }
+
+  if (expectedState && position.state !== expectedState) {
+    throw new Error(`Estado da posição física (${position.state}) diverge do estado esperado (${expectedState})`);
+  }
+
+  const previousQuantity = Number(position.quantity) || 0;
+  const newQuantity = previousQuantity + deltaQuantity;
+
+  if (newQuantity < -0.00001) {
+    throw new Error(
+      `Saldo insuficiente na posição física ${positionId}: saldo atual ${previousQuantity}, débito solicitado ${Math.abs(deltaQuantity)}`
+    );
+  }
+
+  database.prepare(`
+    UPDATE stock_positions 
+    SET quantity = ?, updated_at = CURRENT_TIMESTAMP 
+    WHERE id = ?
+  `).run(newQuantity, positionId);
+
+  return {
+    positionId: position.id,
+    previousQuantity,
+    newQuantity,
+    locationId: position.location_id,
+    state: position.state
+  };
+}
+
+/**
  * Consulta a soma física de todas as posições de um item em uma filial.
  */
 export function getPositionsTotalQuantity(branchId: string, itemId: string, database: any = db): number {

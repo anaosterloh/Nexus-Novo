@@ -351,6 +351,7 @@ export function initDb() {
       branch_id TEXT NOT NULL,
       item_id TEXT NOT NULL,
       lot_id TEXT,
+      position_id TEXT,
       serial_number TEXT NOT NULL,
       physical_location TEXT,
       status TEXT DEFAULT 'in_stock', -- 'in_stock', 'reserved', 'shipped', 'consumed', 'maintenance', 'blocked'
@@ -360,7 +361,8 @@ export function initDb() {
       FOREIGN KEY (company_id) REFERENCES companies(id),
       FOREIGN KEY (branch_id) REFERENCES branches(id),
       FOREIGN KEY (item_id) REFERENCES inventory_items(id),
-      FOREIGN KEY (lot_id) REFERENCES stock_lots(id)
+      FOREIGN KEY (lot_id) REFERENCES stock_lots(id),
+      FOREIGN KEY (position_id) REFERENCES stock_positions(id)
     )
   `);
 
@@ -369,6 +371,18 @@ export function initDb() {
   db.exec('CREATE INDEX IF NOT EXISTS idx_stock_serials_lot ON stock_serials(lot_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_stock_serials_num ON stock_serials(serial_number)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_stock_serials_status ON stock_serials(status)');
+
+  // Migração segura da coluna position_id em stock_serials caso a tabela já existisse
+  try {
+    const serialTableInfo = db.prepare("PRAGMA table_info(stock_serials)").all() as any[];
+    const hasPositionId = serialTableInfo.some(col => col.name === 'position_id');
+    if (!hasPositionId) {
+      db.exec("ALTER TABLE stock_serials ADD COLUMN position_id TEXT REFERENCES stock_positions(id)");
+    }
+    db.exec('CREATE INDEX IF NOT EXISTS idx_stock_serials_position ON stock_serials(position_id)');
+  } catch (err) {
+    console.warn('[AVISO ESTOQUE] Erro ao verificar/criar coluna position_id em stock_serials:', err);
+  }
 
   // Unicidade de número de série segura para bases existentes com proteção contra falhas de migração
   try {
@@ -422,6 +436,36 @@ export function initDb() {
   db.exec('CREATE INDEX IF NOT EXISTS idx_stock_res_item ON stock_reservations(item_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_stock_res_ref ON stock_reservations(reference_type, reference_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_stock_res_status ON stock_reservations(status)');
+
+  // 5.1 Alocações Físicas de Separação / Picking (detalhamento físico da reserva)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS picking_allocations (
+      id TEXT PRIMARY KEY,
+      reservation_id TEXT NOT NULL,
+      position_id TEXT NOT NULL,
+      lot_id TEXT,
+      serial_id TEXT,
+      quantity REAL NOT NULL,
+      status TEXT DEFAULT 'active', -- 'active', 'cancelled', 'fulfilled'
+      picked_by TEXT,
+      picked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      cancelled_at DATETIME,
+      fulfilled_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (reservation_id) REFERENCES stock_reservations(id),
+      FOREIGN KEY (position_id) REFERENCES stock_positions(id),
+      FOREIGN KEY (lot_id) REFERENCES stock_lots(id),
+      FOREIGN KEY (serial_id) REFERENCES stock_serials(id)
+    )
+  `);
+
+  db.exec('CREATE INDEX IF NOT EXISTS idx_picking_res ON picking_allocations(reservation_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_picking_pos ON picking_allocations(position_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_picking_status ON picking_allocations(status)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_picking_lot ON picking_allocations(lot_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_picking_serial ON picking_allocations(serial_id)');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_picking_active_serial ON picking_allocations(serial_id) WHERE serial_id IS NOT NULL AND status = \'active\'');
 
   // 6. Composição de Produto / BOM (Bill of Materials para Kits e Itens Compostos)
   db.exec(`
@@ -1345,6 +1389,18 @@ export function initDb() {
     }
   } catch (err) {
     console.warn('[AVISO ESTOQUE] Erro ao verificar coluna stock_flow_mode em sales_orders:', err);
+  }
+
+  // Migração segura e idempotente de stock_serials.position_id
+  try {
+    const serialTableInfo = db.prepare("PRAGMA table_info(stock_serials)").all() as any[];
+    const hasPositionId = serialTableInfo.some(col => col.name === 'position_id');
+    if (!hasPositionId) {
+      db.exec("ALTER TABLE stock_serials ADD COLUMN position_id TEXT REFERENCES stock_positions(id)");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_stock_serials_position ON stock_serials(position_id)");
+    }
+  } catch (err) {
+    console.warn('[AVISO ESTOQUE] Erro ao verificar coluna position_id em stock_serials:', err);
   }
 
   // seedTraceableStockFoundation() desativado na inicialização padrão conforme especificação

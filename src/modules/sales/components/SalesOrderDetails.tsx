@@ -21,15 +21,17 @@ import {
   Truck, 
   Receipt,
   ShieldCheck,
-  AlertCircle
+  AlertCircle,
+  Boxes
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { cn } from '@/lib/utils';
 import { Separator } from '@/components/ui/separator';
+import { PickingPanel } from './PickingPanel';
 
 interface OrderItem {
   id: string;
@@ -48,6 +50,7 @@ interface OrderDetails {
   customer_doc: string;
   total_amount: number;
   status: string;
+  stock_flow_mode?: string;
   notes: string;
   created_at: string;
   items: OrderItem[];
@@ -68,8 +71,40 @@ export function SalesOrderDetails({ order, loading, onConfirm, showSensitiveData
   const [confirming, setConfirming] = useState(false);
   const [shipping, setShipping] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [canShip, setCanShip] = useState<boolean>(true);
+  const [pickingStatus, setPickingStatus] = useState<string>('not_started');
   const { can } = usePermissions();
   const showPrices = can('view_sales') || can('view_financials');
+
+  const isLegacy = order?.stock_flow_mode === 'legacy_physical_deducted';
+
+  // Carregar status de picking para saber se pode enviar
+  const loadPickingStatus = async () => {
+    if (!order || order.status !== 'confirmed' || isLegacy) {
+      setCanShip(true);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/sales/orders/${order.id}/picking`);
+      if (res.ok) {
+        const data = await res.json();
+        setCanShip(Boolean(data.canShip));
+        if (data.allComplete) {
+          setPickingStatus('complete');
+        } else if (data.totalPicked > 0) {
+          setPickingStatus('partial');
+        } else {
+          setPickingStatus('not_started');
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  useEffect(() => {
+    loadPickingStatus();
+  }, [order?.id, order?.status]);
 
   const steps = [
     { id: 'received', label: 'Recebido', icon: Clock },
@@ -83,7 +118,10 @@ export function SalesOrderDetails({ order, loading, onConfirm, showSensitiveData
 
   const currentStepIndex = steps.findIndex(s => {
     if (order?.status === 'draft') return s.id === 'received';
-    if (order?.status === 'confirmed') return s.id === 'confirmed';
+    if (order?.status === 'confirmed') {
+      if (pickingStatus === 'complete') return s.id === 'separation';
+      return s.id === 'confirmed';
+    }
     if (order?.status === 'shipped') return s.id === 'shipped';
     return false;
   });
@@ -255,8 +293,23 @@ export function SalesOrderDetails({ order, loading, onConfirm, showSensitiveData
 
   return (
     <Tabs defaultValue="details" className="w-full">
-      <TabsList className="grid w-full grid-cols-2 mb-6">
+      <TabsList className="grid w-full grid-cols-3 mb-6">
         <TabsTrigger value="details">Detalhes do Pedido</TabsTrigger>
+        <TabsTrigger value="picking" className="flex items-center gap-1.5">
+          <Boxes className="h-4 w-4" />
+          Separação
+          {order?.status === 'confirmed' && !isLegacy && (
+            <Badge 
+              variant="secondary" 
+              className={cn(
+                "ml-1.5 text-[9px] px-1.5 py-0 h-4 font-mono",
+                canShip ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"
+              )}
+            >
+              {canShip ? 'Pronto' : 'Pendente'}
+            </Badge>
+          )}
+        </TabsTrigger>
         <TabsTrigger value="tracking">Rastreamento & Evolução</TabsTrigger>
       </TabsList>
 
@@ -355,24 +408,37 @@ export function SalesOrderDetails({ order, loading, onConfirm, showSensitiveData
         )}
 
         {order.status === 'confirmed' && (
-          <div className="flex flex-col sm:flex-row gap-3">
-            <Button 
-              className="flex-1 bg-emerald-600 hover:bg-emerald-700 h-12 text-base font-bold shadow-lg shadow-emerald-500/20"
-              onClick={handleShip}
-              disabled={shipping || cancelling}
-            >
-              <Truck className="mr-2 h-5 w-5" />
-              {shipping ? 'Enviando...' : 'Enviar Pedido'}
-            </Button>
-            <Button 
-              variant="outline"
-              className="border-rose-300 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/30 h-12 text-base font-bold"
-              onClick={handleCancel}
-              disabled={shipping || cancelling}
-            >
-              <AlertCircle className="mr-2 h-5 w-5" />
-              {cancelling ? 'Cancelando...' : 'Cancelar Pedido'}
-            </Button>
+          <div className="space-y-2">
+            <div className="flex flex-col sm:flex-row gap-3">
+              <Button 
+                className={cn(
+                  "flex-1 h-12 text-base font-bold shadow-lg transition-all",
+                  canShip 
+                    ? "bg-emerald-600 hover:bg-emerald-700 shadow-emerald-500/20 text-white" 
+                    : "bg-zinc-200 dark:bg-zinc-800 text-zinc-400 cursor-not-allowed border border-dashed border-zinc-300 dark:border-zinc-700"
+                )}
+                onClick={handleShip}
+                disabled={shipping || cancelling || !canShip}
+              >
+                <Truck className="mr-2 h-5 w-5" />
+                {shipping ? 'Enviando...' : 'Enviar Pedido'}
+              </Button>
+              <Button 
+                variant="outline"
+                className="border-rose-300 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/30 h-12 text-base font-bold"
+                onClick={handleCancel}
+                disabled={shipping || cancelling}
+              >
+                <AlertCircle className="mr-2 h-5 w-5" />
+                {cancelling ? 'Cancelando...' : 'Cancelar Pedido'}
+              </Button>
+            </div>
+            {!canShip && !isLegacy && (
+              <p className="text-xs text-amber-600 dark:text-amber-400 text-center font-medium flex items-center justify-center gap-1.5">
+                <Clock className="h-3.5 w-3.5" />
+                Conclua a separação física de todos os itens na aba &ldquo;Separação&rdquo; antes de realizar o envio.
+              </p>
+            )}
           </div>
         )}
 
@@ -455,6 +521,18 @@ export function SalesOrderDetails({ order, loading, onConfirm, showSensitiveData
             </div>
           </div>
         </div>
+      </TabsContent>
+
+      <TabsContent value="picking" className="space-y-6">
+        <PickingPanel 
+          orderId={order.id}
+          orderStatus={order.status}
+          isLegacy={isLegacy}
+          onPickingUpdated={async () => {
+            await loadPickingStatus();
+            onConfirm?.();
+          }}
+        />
       </TabsContent>
 
       <TabsContent value="tracking" className="space-y-6">

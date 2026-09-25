@@ -1,6 +1,6 @@
 import express from 'express';
 import db from '../db';
-import { applyStockPositionDelta } from '../services/stockPositions';
+import { applyStockPositionDelta, applyStockPositionDeltaById } from '../services/stockPositions';
 import {
   checkItemsAvailability,
   createSalesOrderReservations,
@@ -8,6 +8,15 @@ import {
   fulfillSalesOrderReservations,
   validateSalesOrderActiveReservations
 } from '../services/stockReservations';
+import {
+  getOrderPickingSummary,
+  getPickingPositionOptions,
+  getPickingSerialOptions,
+  createPickingAllocation,
+  cancelPickingAllocation,
+  cancelOrderPickingAllocations,
+  validateAndGetCompletePickingAllocations
+} from '../services/picking';
 
 const router = express.Router();
 
@@ -199,7 +208,8 @@ router.put('/orders/:orderId/cancel', (req, res) => {
           throw new Error('Cancelamento automático bloqueado: este pedido foi confirmado no fluxo legado com baixa física direta já realizada. É necessária revisão manual ou processo de devolução para estornar o estoque físico.');
         }
 
-        // Fluxo novo (reservation_v1): cancelar reservas ativas e sincronizar reserved_quantity
+        // Fluxo novo (reservation_v1): cancelar alocações ativas de picking, liberar seriais e cancelar reservas
+        cancelOrderPickingAllocations(orderId, db);
         cancelSalesOrderReservations(orderId, db);
         db.prepare("UPDATE sales_orders SET status = 'cancelled' WHERE id = ?").run(orderId);
       } else if (order.status === 'draft') {
@@ -215,7 +225,7 @@ router.put('/orders/:orderId/cancel', (req, res) => {
   }
 });
 
-// Ship sales order: consume reservation and deduct physical stock (or simply transition if legacy)
+// Ship sales order: consume exact picking allocations and deduct physical stock (or simply transition if legacy)
 router.put('/orders/:orderId/ship', (req, res) => {
   const { orderId } = req.params;
 
@@ -241,14 +251,7 @@ router.put('/orders/:orderId/ship', (req, res) => {
         WHERE oi.order_id = ?
       `).all(orderId) as any[];
 
-      // Bloquear se qualquer item exigir rastreabilidade por lote ou número de série
-      for (const item of items) {
-        if (item.tracks_batch === 1 || item.tracks_serial === 1) {
-          throw new Error(`O item "${item.item_name || item.item_code}" exige separação/rastreabilidade antes do envio. Selecione lote, série ou posição antes da baixa física.`);
-        }
-      }
-
-      // Validar reservas ativas integralmente antes de QUALQUER baixa física
+      // 1. Validar reservas comerciais ativas integralmente
       const reservationValidation = validateSalesOrderActiveReservations(order, items, db);
       if (!reservationValidation.valid) {
         const err: any = new Error(reservationValidation.error || 'Reservas ativas não correspondem integralmente aos itens do pedido.');
@@ -257,56 +260,189 @@ router.put('/orders/:orderId/ship', (req, res) => {
         throw err;
       }
 
-      // Para itens simples: deduzir físico, registrar movimentação como sale_exit e consumir reservas
-      for (const item of items) {
-        const balance = db.prepare('SELECT quantity FROM stock_balances WHERE branch_id = ? AND item_id = ?').get(order.branch_id, item.item_id) as { quantity: number } | undefined;
-        const currentQty = balance ? balance.quantity : 0;
-        const newQty = currentQty - item.quantity;
+      // 2. Validar Picking Completo antes de qualquer baixa física
+      const pickingValidation = validateAndGetCompletePickingAllocations(order, db);
+      if (!pickingValidation.valid) {
+        const err: any = new Error(pickingValidation.error || 'Separação física de picking incompleta ou inconsistente.');
+        err.code = 'PICKING_INCOMPLETE';
+        throw err;
+      }
 
-        // 1. Atualizar saldo agregado stock_balances
-        db.prepare('UPDATE stock_balances SET quantity = ? WHERE branch_id = ? AND item_id = ?')
-          .run(newQty, order.branch_id, item.item_id);
+      const activeAllocations = pickingValidation.allocations;
 
-        // 2. Deduzir da posição física AVAILABLE (SALDO LEGADO / NÃO ALOCADO)
-        applyStockPositionDelta({
-          companyId: order.company_id,
-          branchId: order.branch_id,
-          itemId: item.item_id,
-          deltaQuantity: -item.quantity,
-          state: 'AVAILABLE',
-          lotId: null
-        });
+      // 3. Executar baixa física EXATA por posição (applyStockPositionDeltaById) e registrar movimentos
+      for (const alloc of activeAllocations) {
+        const allocQty = Number(alloc.quantity);
 
-        // 3. Registrar saída física estruturada em stock_movements com sale_exit
+        // Baixa na posição física exata
+        applyStockPositionDeltaById({
+          positionId: alloc.position_id,
+          deltaQuantity: -allocQty,
+          expectedBranchId: order.branch_id,
+          expectedItemId: alloc.item_id,
+          expectedState: 'AVAILABLE'
+        }, db);
+
+        // Obter localização física para source_location de auditoria
+        const posInfo = db.prepare('SELECT location_id FROM stock_positions WHERE id = ?').get(alloc.position_id) as any;
+
+        // Registrar saída física estruturada em stock_movements com sale_exit e rastreabilidade de lote/serial/origem
         db.prepare(`
           INSERT INTO stock_movements (
-            id, branch_id, item_id, user_id, type, quantity, previous_balance, new_balance, reason, reference_id, movement_reason
-          ) VALUES (?, ?, ?, ?, 'exit', ?, ?, ?, ?, ?, 'sale_exit')
+            id, branch_id, item_id, user_id, type, quantity, previous_balance, new_balance, reason, reference_id, movement_reason, lot_id, serial_id, source_location
+          ) VALUES (?, ?, ?, ?, 'exit', ?, 0, 0, ?, ?, 'sale_exit', ?, ?, ?)
         `).run(
           `mov_exit_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
           order.branch_id,
-          item.item_id,
+          alloc.item_id,
           order.user_id,
-          item.quantity,
-          currentQty,
-          newQty,
+          allocQty,
           `Venda Pedido ${orderId}`,
-          orderId
+          orderId,
+          alloc.lot_id || null,
+          alloc.serial_id || null,
+          posInfo ? posInfo.location_id : null
         );
+
+        // Se a alocação contiver serial: atualizar status -> 'shipped' e position_id -> NULL
+        if (alloc.serial_id) {
+          db.prepare(`
+            UPDATE stock_serials 
+            SET status = 'shipped', position_id = NULL, updated_at = CURRENT_TIMESTAMP 
+            WHERE id = ?
+          `).run(alloc.serial_id);
+        }
       }
 
-      // 4. Marcar reservas como fulfilled e sincronizar reserved_quantity
+      // 4. Atualizar agregado stock_balances por item
+      const itemTotals = new Map<string, number>();
+      for (const alloc of activeAllocations) {
+        itemTotals.set(alloc.item_id, (itemTotals.get(alloc.item_id) || 0) + Number(alloc.quantity));
+      }
+
+      for (const [itemId, totalShipped] of itemTotals.entries()) {
+        const bal = db.prepare('SELECT quantity FROM stock_balances WHERE branch_id = ? AND item_id = ?').get(order.branch_id, itemId) as any;
+        const curBal = bal ? Number(bal.quantity) : 0;
+        const newBal = curBal - totalShipped;
+
+        db.prepare('UPDATE stock_balances SET quantity = ? WHERE branch_id = ? AND item_id = ?')
+          .run(newBal, order.branch_id, itemId);
+
+        // Atualizar previous_balance e new_balance nos movimentos criados para esse item no pedido
+        db.prepare(`
+          UPDATE stock_movements 
+          SET previous_balance = ?, new_balance = ? 
+          WHERE reference_id = ? AND item_id = ? AND movement_reason = 'sale_exit'
+        `).run(curBal, newBal, orderId, itemId);
+      }
+
+      // 5. Marcar alocações como fulfilled
+      db.prepare(`
+        UPDATE picking_allocations 
+        SET status = 'fulfilled', fulfilled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP 
+        WHERE id IN (${activeAllocations.map(() => '?').join(',')})
+      `).run(...activeAllocations.map(a => a.id));
+
+      // 6. Marcar reservas como fulfilled e sincronizar reserved_quantity
       fulfillSalesOrderReservations(orderId, db);
 
-      // 5. Atualizar status do pedido para shipped
+      // 7. Atualizar status do pedido para shipped
       db.prepare("UPDATE sales_orders SET status = 'shipped' WHERE id = ?").run(orderId);
     });
 
     db_exec();
-    res.json({ success: true, message: 'Pedido enviado com sucesso e estoque físico baixado.' });
+    res.json({ success: true, message: 'Pedido enviado com sucesso e estoque físico baixado a partir da separação.' });
   } catch (error: any) {
     console.error('Error shipping order:', error);
     res.status(400).json({ error: error.message || 'Falha ao enviar pedido' });
+  }
+});
+
+// ==========================================
+// ROTAS DE SEPARAÇÃO / PICKING
+// ==========================================
+
+// Resumo do Picking do Pedido
+router.get('/orders/:orderId/picking', (req, res) => {
+  const { orderId } = req.params;
+  try {
+    const summary = getOrderPickingSummary(orderId, db);
+    res.json(summary);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Erro ao carregar resumo de separação.' });
+  }
+});
+
+// Opções físicas elegíveis para Picking
+router.get('/orders/:orderId/picking/options', (req, res) => {
+  const { reservationId, positionId } = req.query as { reservationId?: string; positionId?: string };
+  if (!reservationId) {
+    return res.status(400).json({ error: 'reservationId é obrigatório.' });
+  }
+
+  try {
+    const { reservation, item, options } = getPickingPositionOptions(reservationId, db);
+    let serialOptions: any[] = [];
+    if (item.tracks_serial === 1) {
+      serialOptions = getPickingSerialOptions({ reservationId, positionId }, db);
+    }
+
+    res.json({
+      reservationId,
+      item,
+      positions: options,
+      serials: serialOptions
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Erro ao buscar opções físicas para separação.' });
+  }
+});
+
+// Criar alocação de Picking
+router.post('/orders/:orderId/picking/allocations', (req, res) => {
+  const { orderId } = req.params;
+  const { reservationId, positionId, quantity, serialId, userId } = req.body;
+
+  if (!reservationId || !positionId || quantity === undefined) {
+    return res.status(400).json({ error: 'reservationId, positionId e quantity são obrigatórios.' });
+  }
+
+  try {
+    let result: any;
+    const db_exec = db.transaction(() => {
+      result = createPickingAllocation({
+        orderId,
+        reservationId,
+        positionId,
+        quantity: Number(quantity),
+        serialId: serialId || null,
+        userId
+      }, db);
+    });
+
+    db_exec();
+    res.json({ success: true, allocation: result.allocation });
+  } catch (err: any) {
+    console.error('Error creating picking allocation:', err);
+    res.status(400).json({ error: err.message || 'Falha ao criar alocação de separação.' });
+  }
+});
+
+// Cancelar/liberar uma alocação de Picking
+router.put('/orders/:orderId/picking/allocations/:allocationId/cancel', (req, res) => {
+  const { orderId, allocationId } = req.params;
+
+  try {
+    let result: any;
+    const db_exec = db.transaction(() => {
+      result = cancelPickingAllocation({ orderId, allocationId }, db);
+    });
+
+    db_exec();
+    res.json(result);
+  } catch (err: any) {
+    console.error('Error cancelling picking allocation:', err);
+    res.status(400).json({ error: err.message || 'Falha ao liberar alocação de separação.' });
   }
 });
 

@@ -545,6 +545,14 @@ router.post('/reservations', (req, res) => {
     return res.status(400).json({ error: 'Quantidade deve ser maior que zero.' });
   }
 
+  // Proteção: este endpoint é exclusivo para reservas de origem manual
+  const resolvedRefType = referenceType || 'manual';
+  if (resolvedRefType !== 'manual') {
+    return res.status(400).json({
+      error: `Criação direta de reserva para o fluxo '${resolvedRefType}' não é permitida por este endpoint. Utilize o fluxo de negócio responsável (ex: confirmação de pedido de venda).`
+    });
+  }
+
   const item = db.prepare('SELECT company_id, code, description FROM inventory_items WHERE id = ?').get(itemId) as any;
   if (!item) return res.status(404).json({ error: 'Produto não encontrado.' });
   const compId = companyId || item.company_id || 'comp_1';
