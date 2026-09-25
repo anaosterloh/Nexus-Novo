@@ -66,6 +66,8 @@ import { usePermissions } from '@/hooks/usePermissions';
 
 export function SalesOrderDetails({ order, loading, onConfirm, showSensitiveData = true }: SalesOrderDetailsProps) {
   const [confirming, setConfirming] = useState(false);
+  const [shipping, setShipping] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const { can } = usePermissions();
   const showPrices = can('view_sales') || can('view_financials');
 
@@ -94,19 +96,7 @@ export function SalesOrderDetails({ order, loading, onConfirm, showSensitiveData
         method: 'PUT'
       });
       if (response.ok) {
-        // Simulate integration with Finance Module (Accounts Receivable)
-        const newReceivable = {
-          id: `REC-${Date.now()}`,
-          customer: order.customer_name,
-          description: `Pedido #${order.id.split('_')[1] || order.id}`,
-          amount: order.total_amount,
-          dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 30 days from now
-          status: 'pending',
-          type: 'Boleto'
-        };
-        localStorage.setItem('nexus_new_receivable', JSON.stringify(newReceivable));
-
-        toast.success('Pedido confirmado! Estoque baixado e financeiro gerado.');
+        toast.success('Pedido confirmado e estoque reservado.');
         onConfirm?.();
       } else {
         const err = await response.json();
@@ -118,6 +108,50 @@ export function SalesOrderDetails({ order, loading, onConfirm, showSensitiveData
       setConfirming(false);
     }
   };
+
+  const handleShip = async () => {
+    if (!order) return;
+    setShipping(true);
+    try {
+      const response = await fetch(`/api/sales/orders/${order.id}/ship`, {
+        method: 'PUT'
+      });
+      if (response.ok) {
+        toast.success('Pedido enviado e estoque físico baixado.');
+        onConfirm?.();
+      } else {
+        const err = await response.json();
+        toast.error(err.error || 'Erro ao enviar pedido');
+      }
+    } catch (error) {
+      toast.error('Erro na comunicação com o servidor');
+    } finally {
+      setShipping(false);
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!order) return;
+    setCancelling(true);
+    try {
+      const response = await fetch(`/api/sales/orders/${order.id}/cancel`, {
+        method: 'PUT'
+      });
+      if (response.ok) {
+        toast.success('Pedido cancelado e reserva liberada.');
+        onConfirm?.();
+      } else {
+        const err = await response.json();
+        toast.error(err.error || 'Erro ao cancelar pedido');
+      }
+    } catch (error) {
+      toast.error('Erro na comunicação com o servidor');
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  const isConfirmedOrBeyond = order?.status === 'confirmed' || order?.status === 'shipped';
 
   const timelineEvents: TimelineEvent[] = [
     {
@@ -153,30 +187,34 @@ export function SalesOrderDetails({ order, loading, onConfirm, showSensitiveData
     },
     {
       id: '4',
-      title: 'Pedido Iniciado',
-      description: 'Ordem de venda gerada e enviada para separação.',
-      date: format(new Date(), 'dd/MM/yyyy'),
-      time: format(new Date(), 'HH:mm'),
-      status: order?.status === 'confirmed' ? 'completed' : 'current',
+      title: 'Pedido Confirmado',
+      description: 'Pedido confirmado e reserva de estoque gerada.',
+      date: isConfirmedOrBeyond ? format(new Date(), 'dd/MM/yyyy') : format(new Date(), 'dd/MM/yyyy'),
+      time: isConfirmedOrBeyond ? format(new Date(), 'HH:mm') : format(new Date(), 'HH:mm'),
+      status: isConfirmedOrBeyond ? 'completed' : 'current',
       icon: Package
     },
     {
       id: '5',
-      title: 'Material Retirado do Estoque',
-      description: 'Itens separados e reservados no sistema.',
-      date: '---',
-      time: '--:--',
-      status: order?.status === 'confirmed' ? 'completed' : 'pending',
+      title: 'Material Reservado no Estoque',
+      description: order?.status === 'shipped' 
+        ? 'Reserva consumida e saída física realizada no envio.' 
+        : 'Itens reservados no sistema aguardando separação/envio.',
+      date: isConfirmedOrBeyond ? format(new Date(), 'dd/MM/yyyy') : '---',
+      time: isConfirmedOrBeyond ? format(new Date(), 'HH:mm') : '--:--',
+      status: isConfirmedOrBeyond ? 'completed' : 'pending',
       icon: Package
     },
     {
       id: '6',
-      title: 'Aguardando Conferência',
-      description: 'Conferência física dos itens antes do faturamento.',
-      date: '---',
-      time: '--:--',
-      status: 'pending',
-      icon: ShieldCheck
+      title: 'Saída Física e Envio',
+      description: order?.status === 'shipped' 
+        ? 'Mercadoria despachada com baixa física efetuada.' 
+        : 'Aguardando conferência e envio físico.',
+      date: order?.status === 'shipped' ? format(new Date(), 'dd/MM/yyyy') : '---',
+      time: order?.status === 'shipped' ? format(new Date(), 'HH:mm') : '--:--',
+      status: order?.status === 'shipped' ? 'completed' : 'pending',
+      icon: Truck
     },
     {
       id: '7',
@@ -312,8 +350,30 @@ export function SalesOrderDetails({ order, loading, onConfirm, showSensitiveData
             disabled={confirming}
           >
             <CheckCircle className="mr-2 h-5 w-5" />
-            {confirming ? 'Confirmando...' : 'Confirmar Pedido e Baixar Estoque'}
+            {confirming ? 'Confirmando...' : 'Confirmar Pedido e Reservar Estoque'}
           </Button>
+        )}
+
+        {order.status === 'confirmed' && (
+          <div className="flex flex-col sm:flex-row gap-3">
+            <Button 
+              className="flex-1 bg-emerald-600 hover:bg-emerald-700 h-12 text-base font-bold shadow-lg shadow-emerald-500/20"
+              onClick={handleShip}
+              disabled={shipping || cancelling}
+            >
+              <Truck className="mr-2 h-5 w-5" />
+              {shipping ? 'Enviando...' : 'Enviar Pedido'}
+            </Button>
+            <Button 
+              variant="outline"
+              className="border-rose-300 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/30 h-12 text-base font-bold"
+              onClick={handleCancel}
+              disabled={shipping || cancelling}
+            >
+              <AlertCircle className="mr-2 h-5 w-5" />
+              {cancelling ? 'Cancelando...' : 'Cancelar Pedido'}
+            </Button>
+          </div>
         )}
 
         <Separator />

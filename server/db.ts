@@ -692,6 +692,7 @@ export function initDb() {
       user_id TEXT NOT NULL,
       carrier_id TEXT,
       status TEXT DEFAULT 'draft', -- 'draft', 'confirmed', 'shipped', 'cancelled'
+      stock_flow_mode TEXT DEFAULT 'reservation_v1', -- 'legacy_physical_deducted', 'reservation_v1'
       total_amount REAL DEFAULT 0,
       notes TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1323,6 +1324,29 @@ export function initDb() {
   migrateToEntities();
   // Migração segura e idempotente de stock_balances para stock_positions (SALDO LEGADO / NÃO ALOCADO)
   migrateStockBalancesToPositions(db);
+
+  // Migração segura e idempotente de sales_orders.stock_flow_mode para proteção contra dupla baixa
+  try {
+    const tableInfo = db.prepare("PRAGMA table_info(sales_orders)").all() as any[];
+    const hasFlowMode = tableInfo.some(col => col.name === 'stock_flow_mode');
+    if (!hasFlowMode) {
+      db.exec("ALTER TABLE sales_orders ADD COLUMN stock_flow_mode TEXT DEFAULT 'reservation_v1'");
+      db.prepare(`
+        UPDATE sales_orders 
+        SET stock_flow_mode = 'legacy_physical_deducted' 
+        WHERE status IN ('confirmed', 'shipped')
+      `).run();
+    } else {
+      db.prepare(`
+        UPDATE sales_orders 
+        SET stock_flow_mode = 'legacy_physical_deducted' 
+        WHERE status IN ('confirmed', 'shipped') AND stock_flow_mode IS NULL
+      `).run();
+    }
+  } catch (err) {
+    console.warn('[AVISO ESTOQUE] Erro ao verificar coluna stock_flow_mode em sales_orders:', err);
+  }
+
   // seedTraceableStockFoundation() desativado na inicialização padrão conforme especificação
 }
 

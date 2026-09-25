@@ -1,6 +1,12 @@
 import express from 'express';
 import db from '../db';
 import { applyStockPositionDelta } from '../services/stockPositions';
+import {
+  checkItemsAvailability,
+  createSalesOrderReservations,
+  cancelSalesOrderReservations,
+  fulfillSalesOrderReservations
+} from '../services/stockReservations';
 
 const router = express.Router();
 
@@ -108,66 +114,189 @@ router.get('/orders/:orderId', (req, res) => {
   res.json({ ...order, items });
 });
 
-// Confirm sales order and deduct stock
+// Confirm sales order and reserve stock (NO physical deduction, all-or-nothing check)
 router.put('/orders/:orderId/confirm', (req, res) => {
   const { orderId } = req.params;
 
-  const db_exec = db.transaction(() => {
-    // 1. Get order and items
-    const order = db.prepare('SELECT * FROM sales_orders WHERE id = ?').get(orderId) as any;
-    if (!order) throw new Error('Order not found');
-    if (order.status !== 'draft') throw new Error('Order is already confirmed or cancelled');
+  try {
+    const db_exec = db.transaction(() => {
+      // 1. Get order and items
+      const order = db.prepare('SELECT * FROM sales_orders WHERE id = ?').get(orderId) as any;
+      if (!order) throw new Error('Order not found');
+      if (order.status !== 'draft') {
+        throw new Error('Apenas pedidos em rascunho (draft) podem ser confirmados.');
+      }
 
-    const items = db.prepare('SELECT * FROM sales_order_items WHERE order_id = ?').all(orderId) as any[];
+      const items = db.prepare(`
+        SELECT oi.*, i.code as item_code, i.description as item_name
+        FROM sales_order_items oi
+        JOIN inventory_items i ON oi.item_id = i.id
+        WHERE oi.order_id = ?
+      `).all(orderId) as any[];
 
-    // 2. Deduct stock for each item
-    for (const item of items) {
-      const balance = db.prepare('SELECT quantity FROM stock_balances WHERE branch_id = ? AND item_id = ?').get(order.branch_id, item.item_id) as { quantity: number } | undefined;
-      const currentQty = balance ? balance.quantity : 0;
-      const newQty = currentQty - item.quantity;
+      if (!items || items.length === 0) {
+        throw new Error('O pedido não possui itens para confirmação.');
+      }
 
-      // Update balance
-      db.prepare('UPDATE stock_balances SET quantity = ? WHERE branch_id = ? AND item_id = ?')
-        .run(newQty, order.branch_id, item.item_id);
-
-      // Deduct from physical stock positions (SALDO LEGADO / NÃO ALOCADO em AVAILABLE)
-      applyStockPositionDelta({
-        companyId: order.company_id,
-        branchId: order.branch_id,
-        itemId: item.item_id,
-        deltaQuantity: -item.quantity,
-        state: 'AVAILABLE',
-        lotId: null
-      });
-
-      // Record movement
-      db.prepare(`
-        INSERT INTO stock_movements (id, branch_id, item_id, user_id, type, quantity, previous_balance, new_balance, reason, reference_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        `mov_exit_${Date.now()}_${Math.random()}`,
+      // 2. Check stock availability (All or Nothing)
+      const availability = checkItemsAvailability(
         order.branch_id,
-        item.item_id,
-        order.user_id,
-        'exit',
-        item.quantity,
-        currentQty,
-        newQty,
-        `Venda Pedido ${orderId}`,
-        orderId
+        items.map(i => ({ itemId: i.item_id, quantity: i.quantity })),
+        db
       );
-    }
 
-    // 3. Update order status
-    db.prepare("UPDATE sales_orders SET status = 'confirmed' WHERE id = ?").run(orderId);
-  });
+      if (!availability.sufficient) {
+        const details = availability.insufficientItems.map(ins =>
+          `${ins.itemDescription || ins.itemCode}: solicitado ${ins.requestedQuantity}, disponível ${ins.availableQuantity}, falta ${ins.missingQuantity}`
+        ).join('; ');
+        const err: any = new Error(`Estoque insuficiente para confirmar o pedido: ${details}`);
+        err.code = 'INSUFFICIENT_STOCK';
+        err.details = availability.insufficientItems;
+        throw err;
+      }
+
+      // 3. Create active reservations and sync reserved_quantity
+      createSalesOrderReservations(order, items, db);
+
+      // 4. Update order status
+      db.prepare(`
+        UPDATE sales_orders 
+        SET status = 'confirmed', stock_flow_mode = 'reservation_v1' 
+        WHERE id = ?
+      `).run(orderId);
+    });
+
+    db_exec();
+    res.json({ success: true, message: 'Pedido confirmado e estoque reservado com sucesso.' });
+  } catch (error: any) {
+    console.error('Error confirming order:', error);
+    res.status(400).json({
+      error: error.message || 'Failed to confirm order',
+      code: error.code,
+      details: error.details
+    });
+  }
+});
+
+// Cancel sales order and release reservations (if reservation_v1)
+router.put('/orders/:orderId/cancel', (req, res) => {
+  const { orderId } = req.params;
 
   try {
+    const db_exec = db.transaction(() => {
+      const order = db.prepare('SELECT * FROM sales_orders WHERE id = ?').get(orderId) as any;
+      if (!order) throw new Error('Order not found');
+      if (order.status === 'cancelled') {
+        throw new Error('Pedido já está cancelado.');
+      }
+      if (order.status === 'shipped') {
+        throw new Error('Não é possível cancelar um pedido que já foi enviado.');
+      }
+
+      if (order.status === 'confirmed') {
+        if (order.stock_flow_mode === 'legacy_physical_deducted') {
+          throw new Error('Cancelamento automático bloqueado: este pedido foi confirmado no fluxo legado com baixa física direta já realizada. É necessária revisão manual ou processo de devolução para estornar o estoque físico.');
+        }
+
+        // Fluxo novo (reservation_v1): cancelar reservas ativas e sincronizar reserved_quantity
+        cancelSalesOrderReservations(orderId, db);
+        db.prepare("UPDATE sales_orders SET status = 'cancelled' WHERE id = ?").run(orderId);
+      } else if (order.status === 'draft') {
+        db.prepare("UPDATE sales_orders SET status = 'cancelled' WHERE id = ?").run(orderId);
+      }
+    });
+
     db_exec();
-    res.json({ success: true });
+    res.json({ success: true, message: 'Pedido cancelado e reservas liberadas com sucesso.' });
   } catch (error: any) {
-    console.error(error);
-    res.status(400).json({ error: error.message || 'Failed to confirm order' });
+    console.error('Error cancelling order:', error);
+    res.status(400).json({ error: error.message || 'Falha ao cancelar pedido' });
+  }
+});
+
+// Ship sales order: consume reservation and deduct physical stock (or simply transition if legacy)
+router.put('/orders/:orderId/ship', (req, res) => {
+  const { orderId } = req.params;
+
+  try {
+    const db_exec = db.transaction(() => {
+      const order = db.prepare('SELECT * FROM sales_orders WHERE id = ?').get(orderId) as any;
+      if (!order) throw new Error('Order not found');
+      if (order.status !== 'confirmed') {
+        throw new Error('Apenas pedidos confirmados podem ser enviados.');
+      }
+
+      // Pedido legado: baixa física já ocorreu na confirmação antiga
+      if (order.stock_flow_mode === 'legacy_physical_deducted') {
+        db.prepare("UPDATE sales_orders SET status = 'shipped' WHERE id = ?").run(orderId);
+        return;
+      }
+
+      // Pedido novo (reservation_v1):
+      const items = db.prepare(`
+        SELECT oi.*, i.code as item_code, i.description as item_name, i.tracks_batch, i.tracks_serial
+        FROM sales_order_items oi
+        JOIN inventory_items i ON oi.item_id = i.id
+        WHERE oi.order_id = ?
+      `).all(orderId) as any[];
+
+      // Bloquear se qualquer item exigir rastreabilidade por lote ou número de série
+      for (const item of items) {
+        if (item.tracks_batch === 1 || item.tracks_serial === 1) {
+          throw new Error(`O item "${item.item_name || item.item_code}" exige separação/rastreabilidade antes do envio. Selecione lote, série ou posição antes da baixa física.`);
+        }
+      }
+
+      // Para itens simples: deduzir físico, registrar movimentação como sale_exit e consumir reservas
+      for (const item of items) {
+        const balance = db.prepare('SELECT quantity FROM stock_balances WHERE branch_id = ? AND item_id = ?').get(order.branch_id, item.item_id) as { quantity: number } | undefined;
+        const currentQty = balance ? balance.quantity : 0;
+        const newQty = currentQty - item.quantity;
+
+        // 1. Atualizar saldo agregado stock_balances
+        db.prepare('UPDATE stock_balances SET quantity = ? WHERE branch_id = ? AND item_id = ?')
+          .run(newQty, order.branch_id, item.item_id);
+
+        // 2. Deduzir da posição física AVAILABLE (SALDO LEGADO / NÃO ALOCADO)
+        applyStockPositionDelta({
+          companyId: order.company_id,
+          branchId: order.branch_id,
+          itemId: item.item_id,
+          deltaQuantity: -item.quantity,
+          state: 'AVAILABLE',
+          lotId: null
+        });
+
+        // 3. Registrar saída física estruturada em stock_movements com sale_exit
+        db.prepare(`
+          INSERT INTO stock_movements (
+            id, branch_id, item_id, user_id, type, quantity, previous_balance, new_balance, reason, reference_id, movement_reason
+          ) VALUES (?, ?, ?, ?, 'exit', ?, ?, ?, ?, ?, 'sale_exit')
+        `).run(
+          `mov_exit_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+          order.branch_id,
+          item.item_id,
+          order.user_id,
+          item.quantity,
+          currentQty,
+          newQty,
+          `Venda Pedido ${orderId}`,
+          orderId
+        );
+      }
+
+      // 4. Marcar reservas como fulfilled e sincronizar reserved_quantity
+      fulfillSalesOrderReservations(orderId, db);
+
+      // 5. Atualizar status do pedido para shipped
+      db.prepare("UPDATE sales_orders SET status = 'shipped' WHERE id = ?").run(orderId);
+    });
+
+    db_exec();
+    res.json({ success: true, message: 'Pedido enviado com sucesso e estoque físico baixado.' });
+  } catch (error: any) {
+    console.error('Error shipping order:', error);
+    res.status(400).json({ error: error.message || 'Falha ao enviar pedido' });
   }
 });
 

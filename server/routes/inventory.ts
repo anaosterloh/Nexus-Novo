@@ -1,6 +1,10 @@
 import express from 'express';
 import db from '../db';
 import { applyStockPositionDelta } from '../services/stockPositions';
+import {
+  getAvailableToReserve,
+  syncStockBalanceReservedQuantity
+} from '../services/stockReservations';
 
 const router = express.Router();
 
@@ -532,32 +536,74 @@ router.get('/reservations', (req, res) => {
   res.json(reservations);
 });
 
-// 11. Traceable Reservations: Create
+// 11. Traceable Reservations: Create with real availability validation and sync
 router.post('/reservations', (req, res) => {
   const { companyId, branchId, itemId, lotId, serialId, quantity, referenceType, referenceId, notes, createdBy } = req.body;
   if (!itemId || !quantity) return res.status(400).json({ error: 'Item ID and quantity are required' });
+  const requestedQty = Number(quantity);
+  if (isNaN(requestedQty) || requestedQty <= 0) {
+    return res.status(400).json({ error: 'Quantidade deve ser maior que zero.' });
+  }
 
-  const id = `res_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
-  const item = db.prepare('SELECT company_id FROM inventory_items WHERE id = ?').get(itemId) as any;
-  const compId = companyId || (item ? item.company_id : 'comp_1');
+  const item = db.prepare('SELECT company_id, code, description FROM inventory_items WHERE id = ?').get(itemId) as any;
+  if (!item) return res.status(404).json({ error: 'Produto não encontrado.' });
+  const compId = companyId || item.company_id || 'comp_1';
   const branch = db.prepare('SELECT id FROM branches WHERE company_id = ? LIMIT 1').get(compId) as any;
   const branId = branchId || (branch ? branch.id : 'bran_1');
 
+  // Validar disponibilidade real
+  const availableToReserve = getAvailableToReserve(branId, itemId, db);
+  if (availableToReserve < requestedQty) {
+    return res.status(400).json({
+      error: `Estoque insuficiente para reserva manual: disponível ${availableToReserve}, solicitado ${requestedQty}, falta ${requestedQty - availableToReserve}`
+    });
+  }
+
+  const id = `res_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
+
   try {
-    db.prepare(`
-      INSERT INTO stock_reservations (
-        id, company_id, branch_id, item_id, lot_id, serial_id, quantity, reference_type, reference_id, notes, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id, compId, branId, itemId, lotId || null, serialId || null,
-      quantity, referenceType || 'manual', referenceId || null, notes || null, createdBy || 'user_1'
-    );
+    const db_exec = db.transaction(() => {
+      db.prepare(`
+        INSERT INTO stock_reservations (
+          id, company_id, branch_id, item_id, lot_id, serial_id, quantity, reference_type, reference_id, status, notes, created_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+      `).run(
+        id, compId, branId, itemId, lotId || null, serialId || null,
+        requestedQty, referenceType || 'manual', referenceId || null, notes || null, createdBy || 'user_1'
+      );
+
+      syncStockBalanceReservedQuantity(branId, itemId, db);
+    });
+
+    db_exec();
 
     const saved = db.prepare('SELECT * FROM stock_reservations WHERE id = ?').get(id);
     res.json(saved);
   } catch (err: any) {
     console.error('Error creating reservation:', err);
     res.status(500).json({ error: err.message || 'Failed to create reservation' });
+  }
+});
+
+// 11.1 Cancel manual reservation
+router.put('/reservations/:id/cancel', (req, res) => {
+  const { id } = req.params;
+  const reservation = db.prepare('SELECT * FROM stock_reservations WHERE id = ?').get(id) as any;
+  if (!reservation) return res.status(404).json({ error: 'Reserva não encontrada.' });
+  if (reservation.status !== 'active') {
+    return res.status(400).json({ error: 'Apenas reservas ativas podem ser canceladas.' });
+  }
+
+  try {
+    const db_exec = db.transaction(() => {
+      db.prepare("UPDATE stock_reservations SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(id);
+      syncStockBalanceReservedQuantity(reservation.branch_id, reservation.item_id, db);
+    });
+
+    db_exec();
+    res.json({ success: true, message: 'Reserva cancelada com sucesso.' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Falha ao cancelar reserva' });
   }
 });
 
@@ -803,12 +849,18 @@ router.post('/locations', (req, res) => {
     return res.status(400).json({ error: "A chave de sistema 'LEGACY_UNALLOCATED' é reservada para a localização técnica do sistema." });
   }
 
-  // Resolver company_id
-  let resolvedCompanyId = company_id;
-  if (!resolvedCompanyId) {
-    const branch = db.prepare('SELECT company_id FROM branches WHERE id = ?').get(branch_id) as any;
-    resolvedCompanyId = branch ? branch.company_id : 'comp_1';
+  // 1 & 2. Buscar filial real por branch_id
+  const branch = db.prepare('SELECT company_id FROM branches WHERE id = ?').get(branch_id) as any;
+  if (!branch) {
+    return res.status(400).json({ error: 'Filial informada não foi encontrada.' });
   }
+
+  // 3, 4 & 5. Determinar company_id verdadeiro da filial e validar se fornecido (sem fallback silencioso)
+  const trueCompanyId = branch.company_id;
+  if (company_id && company_id !== trueCompanyId) {
+    return res.status(400).json({ error: 'A empresa informada não corresponde à empresa da filial selecionada.' });
+  }
+  const resolvedCompanyId = trueCompanyId;
 
   // Validação de parent_id se fornecido
   if (parent_id) {
