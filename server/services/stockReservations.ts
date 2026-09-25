@@ -11,6 +11,22 @@ export interface InsufficientStockItem {
   missingQuantity: number;
 }
 
+export interface ReservationMismatchDetail {
+  itemId: string;
+  itemCode?: string;
+  itemDescription?: string;
+  requiredQuantity: number;
+  reservedQuantity: number;
+  difference: number;
+  reason: 'MISSING_RESERVATION' | 'PARTIAL_RESERVATION' | 'EXCESS_RESERVATION' | 'UNEXPECTED_ITEM';
+}
+
+export interface ValidateOrderReservationsResult {
+  valid: boolean;
+  error?: string;
+  details: ReservationMismatchDetail[];
+}
+
 /**
  * Consulta a quantidade física em posições com estado 'AVAILABLE'
  * Exclui estados 'QUARANTINE', 'MAINTENANCE', 'PENDING_DISPOSAL'.
@@ -227,5 +243,108 @@ export function fulfillSalesOrderReservations(
   return {
     fulfilledCount: activeReservations.length,
     affectedItems: Array.from(affectedItems)
+  };
+}
+
+/**
+ * Valida integralmente se as reservas ativas correspondem exatamente às necessidades do pedido de venda.
+ * Exige correspondência exata por item e contexto (empresa, filial, pedido), bloqueando divergências.
+ */
+export function validateSalesOrderActiveReservations(
+  order: { id: string; company_id: string; branch_id: string },
+  items: { item_id: string; quantity: number }[],
+  database: any = db
+): ValidateOrderReservationsResult {
+  // 1. Agrupar itens do pedido por item_id
+  const requiredMap = new Map<string, number>();
+  for (const item of items) {
+    const cur = requiredMap.get(item.item_id) || 0;
+    requiredMap.set(item.item_id, cur + Number(item.quantity));
+  }
+
+  // 2. Buscar reservas ativas do pedido
+  const activeReservations = database.prepare(`
+    SELECT * FROM stock_reservations
+    WHERE reference_type = 'sales_order'
+      AND reference_id = ?
+      AND status = 'active'
+  `).all(order.id) as any[];
+
+  // 3. Validar integridade estrutural (contexto de filial e empresa)
+  for (const res of activeReservations) {
+    if (res.company_id !== order.company_id || res.branch_id !== order.branch_id) {
+      return {
+        valid: false,
+        error: `Inconsistência de contexto na reserva ${res.id}: empresa ou filial da reserva difere do pedido de venda.`,
+        details: []
+      };
+    }
+  }
+
+  // 4. Agrupar quantidades reservadas ativas por item_id
+  const reservedMap = new Map<string, number>();
+  for (const res of activeReservations) {
+    const cur = reservedMap.get(res.item_id) || 0;
+    reservedMap.set(res.item_id, cur + Number(res.quantity));
+  }
+
+  const details: ReservationMismatchDetail[] = [];
+  const allItemIds = new Set<string>([...requiredMap.keys(), ...reservedMap.keys()]);
+
+  for (const itemId of allItemIds) {
+    const req = requiredMap.get(itemId) || 0;
+    const res = reservedMap.get(itemId) || 0;
+    const diff = res - req;
+
+    if (Math.abs(diff) > 0.00001) {
+      const itemData = database.prepare('SELECT code, description FROM inventory_items WHERE id = ?').get(itemId) as any;
+      let reason: ReservationMismatchDetail['reason'] = 'PARTIAL_RESERVATION';
+      if (req > 0 && res === 0) {
+        reason = 'MISSING_RESERVATION';
+      } else if (req === 0 && res > 0) {
+        reason = 'UNEXPECTED_ITEM';
+      } else if (res < req) {
+        reason = 'PARTIAL_RESERVATION';
+      } else {
+        reason = 'EXCESS_RESERVATION';
+      }
+
+      details.push({
+        itemId,
+        itemCode: itemData ? itemData.code : itemId,
+        itemDescription: itemData ? itemData.description : '',
+        requiredQuantity: req,
+        reservedQuantity: res,
+        difference: diff,
+        reason
+      });
+    }
+  }
+
+  if (details.length > 0) {
+    const descriptions = details.map(d => {
+      const label = d.itemDescription || d.itemCode || d.itemId;
+      if (d.reason === 'MISSING_RESERVATION') {
+        return `${label}: necessário ${d.requiredQuantity}, nenhuma reserva ativa encontrada`;
+      }
+      if (d.reason === 'PARTIAL_RESERVATION') {
+        return `${label}: necessário ${d.requiredQuantity}, reservado ${d.reservedQuantity} (falta ${Math.abs(d.difference)})`;
+      }
+      if (d.reason === 'EXCESS_RESERVATION') {
+        return `${label}: necessário ${d.requiredQuantity}, reservado ${d.reservedQuantity} (excesso ${d.difference})`;
+      }
+      return `${label}: item inesperado com reserva ativa ${d.reservedQuantity} não presente no pedido`;
+    }).join('; ');
+
+    return {
+      valid: false,
+      error: `Não foi possível enviar o pedido porque as reservas ativas não correspondem integralmente aos itens do pedido: ${descriptions}. Nenhuma movimentação física foi realizada.`,
+      details
+    };
+  }
+
+  return {
+    valid: true,
+    details: []
   };
 }

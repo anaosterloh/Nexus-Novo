@@ -594,6 +594,19 @@ router.put('/reservations/:id/cancel', (req, res) => {
     return res.status(400).json({ error: 'Apenas reservas ativas podem ser canceladas.' });
   }
 
+  // Proteger cancelamento: apenas reservas de origem manual podem ser canceladas por este endpoint
+  if (reservation.reference_type === 'sales_order') {
+    return res.status(409).json({
+      error: 'Esta reserva pertence a um pedido de venda e não pode ser cancelada manualmente. Utilize o cancelamento do pedido de venda para liberar a reserva.'
+    });
+  }
+
+  if (reservation.reference_type !== 'manual') {
+    return res.status(409).json({
+      error: 'Esta reserva pertence a um fluxo operacional e não pode ser cancelada manualmente. Utilize o processo responsável pela reserva.'
+    });
+  }
+
   try {
     const db_exec = db.transaction(() => {
       db.prepare("UPDATE stock_reservations SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(id);
@@ -601,7 +614,7 @@ router.put('/reservations/:id/cancel', (req, res) => {
     });
 
     db_exec();
-    res.json({ success: true, message: 'Reserva cancelada com sucesso.' });
+    res.json({ success: true, message: 'Reserva manual cancelada com sucesso.' });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Falha ao cancelar reserva' });
   }

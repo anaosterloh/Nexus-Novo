@@ -5,7 +5,8 @@ import {
   checkItemsAvailability,
   createSalesOrderReservations,
   cancelSalesOrderReservations,
-  fulfillSalesOrderReservations
+  fulfillSalesOrderReservations,
+  validateSalesOrderActiveReservations
 } from '../services/stockReservations';
 
 const router = express.Router();
@@ -245,6 +246,15 @@ router.put('/orders/:orderId/ship', (req, res) => {
         if (item.tracks_batch === 1 || item.tracks_serial === 1) {
           throw new Error(`O item "${item.item_name || item.item_code}" exige separação/rastreabilidade antes do envio. Selecione lote, série ou posição antes da baixa física.`);
         }
+      }
+
+      // Validar reservas ativas integralmente antes de QUALQUER baixa física
+      const reservationValidation = validateSalesOrderActiveReservations(order, items, db);
+      if (!reservationValidation.valid) {
+        const err: any = new Error(reservationValidation.error || 'Reservas ativas não correspondem integralmente aos itens do pedido.');
+        err.code = 'RESERVATION_MISMATCH';
+        err.details = reservationValidation.details;
+        throw err;
       }
 
       // Para itens simples: deduzir físico, registrar movimentação como sale_exit e consumir reservas
